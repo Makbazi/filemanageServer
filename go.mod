@@ -1,6 +1,6 @@
 module filemanageServer
 
-go 1.25.11
+go 1.27.1
 
 replace filemanageDb => ../filemanageDb
 
