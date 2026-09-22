@@ -1,0 +1,99 @@
+# =============================================================================
+# nginx.conf.sample —— 使用 Nginx 对同机多个 filemanage-server worker 做负载均衡
+#
+# 定位（需求27）：服务端已内置 balancer 模式（filemanage-server -mode balancer，
+# 见 deploy/docker/entrypoint.sh 与 deploy/README.md），零额外组件即可轮询转发。
+# 本文件是内置 balancer 之外的【备选方案】：当希望用 Nginx 做入口
+# （例如已有 Nginx 基础设施、需要 HTTPS 终结、访问日志、限流等能力）时，
+# 可直接对多个 worker 实例（默认模式启动，无需 -mode balancer）做反向代理。
+#
+# 使用方法：
+#   1. 在同一台机器上以不同配置启动多个 worker 实例，分别监听
+#      127.0.0.1:8484 / 8485 / 8486（配置示例见 README.md 的多实例部署一节）；
+#   2. 将本文件内容放入 /etc/nginx/conf.d/filemanage.conf（或替换 server 段），
+#      按需修改域名、证书路径后 `nginx -t && nginx -s reload`。
+# =============================================================================
+
+# ---------- 上游：同机多 worker 实例 ----------
+# 默认轮询（round-robin）。worker 挂掉时 Nginx 在 fail_timeout 内不再向其转发。
+# 如需会话粘性可加 ip_hash;（注意：服务端 JWT 无状态，各节点共用 secretFile
+# 时无需粘性；各节点独立 secretFile 时建议加 ip_hash 或统一 secretFile）。
+upstream filemanage_workers {
+    server 127.0.0.1:8484 max_fails=3 fail_timeout=10s;
+    server 127.0.0.1:8485 max_fails=3 fail_timeout=10s;
+    server 127.0.0.1:8486 max_fails=3 fail_timeout=10s;
+    # 扩容：继续追加 server 127.0.0.1:8487 ... 即可
+}
+
+# ---------- HTTP server（80 端口）----------
+server {
+    listen 80;
+    listen [::]:80;
+    server_name _;   # 改成实际域名，如 filemanage.example.com
+
+    # 大文件上传关键配置：
+    #   client_max_body_size 0     —— 不限制请求体大小（上传任意大小文件）
+    #   proxy_request_buffering off —— 请求体边收边转发，不落 Nginx 临时文件，
+    #                                  避免大上传占满 Nginx 磁盘/双倍 IO
+    client_max_body_size 0;
+    proxy_request_buffering off;
+
+    # 上传/下载大文件耗时较长，放宽读写超时（秒）
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+    proxy_connect_timeout 10s;
+
+    location / {
+        proxy_pass http://filemanage_workers;
+
+        # HTTP/1.1 + 清空 Connection 头，支持对上游长连接与流式传输
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        # 透传真实客户端信息，便于服务端日志与局域网判定（lanOnly）
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 大文件下载时不在 Nginx 侧缓冲响应，直接流式回传
+        proxy_buffering off;
+    }
+}
+
+# ---------- 可选：HTTPS server（443 端口，自签证书示例）----------
+# 生成自签证书（测试用，浏览器会提示不受信任；生产请换成正式证书）：
+#   openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+#       -keyout /etc/nginx/ssl/filemanage.key \
+#       -out    /etc/nginx/ssl/filemanage.crt \
+#       -subj "/CN=filemanage.local"
+# 需要 ssl 模块（发行版 nginx 一般已内置）；确认后取消下面注释：
+#
+# server {
+#     listen 443 ssl;
+#     listen [::]:443 ssl;
+#     server_name filemanage.local;
+#
+#     ssl_certificate     /etc/nginx/ssl/filemanage.crt;
+#     ssl_certificate_key /etc/nginx/ssl/filemanage.key;
+#     ssl_protocols       TLSv1.2 TLSv1.3;
+#
+#     client_max_body_size 0;
+#     proxy_request_buffering off;
+#     proxy_read_timeout 600s;
+#     proxy_send_timeout 600s;
+#
+#     location / {
+#         proxy_pass http://filemanage_workers;
+#         proxy_http_version 1.1;
+#         proxy_set_header Connection "";
+#         proxy_set_header Host              $host;
+#         proxy_set_header X-Real-IP         $remote_addr;
+#         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#         proxy_buffering off;
+#     }
+# }
+#
+# 如启用 HTTPS，建议同时在上面的 80 端口 server 中只保留跳转：
+#     return 301 https://$host$request_uri;

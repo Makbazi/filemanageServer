@@ -1,4 +1,6 @@
-package main
+// Package ai 提供 AI 能力抽象：对文件/图像生成中文描述。
+// Provider 接口 + none/openai/ollama 三个实现（接口化设计，可扩展）。
+package ai
 
 import (
 	"bytes"
@@ -9,31 +11,28 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	filemanagedb "filemanageDb"
+	"filemanageServer/internal/config"
 )
 
-// AIProvider 是预留的 AI 能力接口：对文件/图像/视频生成文字描述。
-// 目前提供 openai 兼容协议（云厂商或本地网关）与 ollama 两种实现，
-// 后续可扩展 embedding 向量检索（filemanageDb 已预留 Embedding 字段）。
-type AIProvider interface {
+// Provider 是 AI 能力接口。Describe 的 data 可为空（如视频或超大文件仅按名描述）。
+type Provider interface {
 	Name() string
-	// Describe 根据文件内容/元数据生成中文描述。data 可为空（如视频或超大文件仅按名描述）。
 	Describe(ctx context.Context, kind, name string, data []byte, mime string) (string, error)
 }
 
-func NewAIProvider(cfg AICfg) AIProvider {
+// NewProvider 按配置构造 Provider。
+func NewProvider(cfg config.AICfg) Provider {
 	switch cfg.Provider {
 	case "openai":
 		return &openaiProvider{cfg: cfg}
 	case "ollama":
 		return &ollamaProvider{cfg: cfg}
 	default:
-		return &noneProvider{}
+		return noneProvider{}
 	}
 }
 
@@ -44,7 +43,7 @@ func (noneProvider) Describe(context.Context, string, string, []byte, string) (s
 	return "", errors.New("AI 未配置：请在服务端 config 的 ai 字段中设置 provider=openai|ollama")
 }
 
-// ---------- prompt ----------
+// ---------- prompt / mime 工具 ----------
 
 func promptFor(kind, name string) string {
 	switch kind {
@@ -59,7 +58,8 @@ func promptFor(kind, name string) string {
 	}
 }
 
-func mimeOf(kind, name string) string {
+// MimeOf 按类型/文件名推断 MIME。
+func MimeOf(kind, name string) string {
 	switch kind {
 	case "image":
 		switch extOf(name) {
@@ -99,9 +99,13 @@ func defaultIfEmpty(s, def string) string {
 	return s
 }
 
-// ---------- openai-compatible ----------
+func trimText(s string) string {
+	return string(bytes.TrimSpace([]byte(s)))
+}
 
-type openaiProvider struct{ cfg AICfg }
+// ---------- openai 兼容协议 ----------
+
+type openaiProvider struct{ cfg config.AICfg }
 
 func (p *openaiProvider) Name() string { return "openai:" + p.cfg.Model }
 
@@ -110,7 +114,6 @@ func (p *openaiProvider) Describe(ctx context.Context, kind, name string, data [
 	if base == "" {
 		base = "https://api.openai.com/v1"
 	}
-	// 多模态：图像以 data URL 形式附带；其余仅按名称/类型文字描述
 	userContent := any(promptFor(kind, name))
 	if len(data) > 0 && kind == "image" {
 		userContent = []any{
@@ -131,10 +134,6 @@ func (p *openaiProvider) Describe(ctx context.Context, kind, name string, data [
 		},
 		"max_tokens": 200,
 	}
-	return p.post(ctx, base, payload)
-}
-
-func (p *openaiProvider) post(ctx context.Context, base string, payload map[string]any) (string, error) {
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
@@ -168,7 +167,7 @@ func (p *openaiProvider) post(ctx context.Context, base string, payload map[stri
 
 // ---------- ollama ----------
 
-type ollamaProvider struct{ cfg AICfg }
+type ollamaProvider struct{ cfg config.AICfg }
 
 func (p *ollamaProvider) Name() string { return "ollama:" + p.cfg.Model }
 
@@ -177,18 +176,11 @@ func (p *ollamaProvider) Describe(ctx context.Context, kind, name string, data [
 	if base == "" {
 		base = "http://127.0.0.1:11434"
 	}
-	msg := map[string]any{
-		"role":    "user",
-		"content": promptFor(kind, name),
-	}
+	msg := map[string]any{"role": "user", "content": promptFor(kind, name)}
 	if len(data) > 0 && kind == "image" {
 		msg["images"] = []string{base64.StdEncoding.EncodeToString(data)}
 	}
-	payload := map[string]any{
-		"model":    p.cfg.Model,
-		"messages": []any{msg},
-		"stream":   false,
-	}
+	payload := map[string]any{"model": p.cfg.Model, "messages": []any{msg}, "stream": false}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/chat", bytes.NewReader(body))
 	if err != nil {
@@ -215,100 +207,5 @@ func (p *ollamaProvider) Describe(ctx context.Context, kind, name string, data [
 	return trimText(out.Message.Content), nil
 }
 
-func trimText(s string) string {
-	return string(bytes.TrimSpace([]byte(s)))
-}
-
-// ---------- AI handlers ----------
-
-// handleAIDescribe POST /api/v1/ai/describe {rootId,path}
-// 读取文件（图像等，限大小），调用 AI 生成描述并入库（记录归属、日期）。
-func (s *server) handleAIDescribe(w http.ResponseWriter, r *http.Request) {
-	var req pathReq
-	if err := decode(r, &req); err != nil || req.Path == "" {
-		writeErr(w, http.StatusBadRequest, errors.New("rootId + path required"))
-		return
-	}
-	u := currentUser(r)
-	root, abs, err := s.resolve(r, req.RootID, req.Path)
-	if err != nil {
-		writeErr(w, statusOf(err), err)
-		return
-	}
-	info, err := os.Stat(abs)
-	if err != nil || info.IsDir() {
-		writeErr(w, http.StatusNotFound, errors.New("file not found"))
-		return
-	}
-	kind := kindOf(req.Path, false)
-	limitMB := s.cfg.AI.MaxFileMB
-	if int(info.Size()) > limitMB*1<<20 {
-		// 大文件（如视频）不送入模型，仅按元数据描述
-		kind = "other"
-	}
-	var data []byte
-	if kind == "image" && info.Size() <= int64(limitMB)<<20 {
-		data, err = os.ReadFile(abs)
-		if err != nil {
-			writeErr(w, statusOf(err), err)
-			return
-		}
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
-	defer cancel()
-	text, err := s.ai.Describe(ctx, kind, info.Name(), data, mimeOf(kind, info.Name()))
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, err)
-		return
-	}
-	rel := relOf(root, abs)
-	desc := &filemanagedb.AIDescription{
-		UserID: u.ID, RootID: req.RootID, Path: rel, Name: info.Name(),
-		Kind: kind, Text: text, Model: s.ai.Name(),
-	}
-	if err := s.store.SaveAIDescription(desc); err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, desc)
-}
-
-// handleAIGetDescription GET /api/v1/ai/description?rootId=&path=
-func (s *server) handleAIGetDescription(w http.ResponseWriter, r *http.Request) {
-	u := currentUser(r)
-	q := r.URL.Query()
-	descs, err := s.store.ListAIDescriptions(u.ID, q.Get("rootId"))
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	rel := cleanRel(q.Get("path"))
-	for _, d := range descs {
-		if d.Path == rel {
-			writeJSON(w, http.StatusOK, d)
-			return
-		}
-	}
-	writeErr(w, http.StatusNotFound, filemanagedb.ErrNotFound)
-}
-
-// handleAISearch POST /api/v1/ai/search {query} —— 根据用户文字描述查找文件（预留）。
-func (s *server) handleAISearch(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Query string `json:"query"`
-	}
-	if err := decode(r, &req); err != nil || req.Query == "" {
-		writeErr(w, http.StatusBadRequest, errors.New("query required"))
-		return
-	}
-	u := currentUser(r)
-	hits, err := s.store.SearchDescriptions(u.ID, req.Query, 50)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
-		return
-	}
-	if hits == nil {
-		hits = []*filemanagedb.SearchHit{}
-	}
-	writeJSON(w, http.StatusOK, hits)
-}
+// Timeout 是 AI 调用的统一超时。
+const Timeout = 120 * time.Second

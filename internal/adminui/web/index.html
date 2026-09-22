@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>FileManage 管理台</title>
+  <!-- 页面由 go:embed 打包、经 /admin/ 伺服，所有资源必须使用相对路径 -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ===== 顶部 toast 提示条容器（JS 动态填充） ===== -->
+  <div id="toast-wrap" aria-live="polite"></div>
+
+  <!-- ===== 未登录：居中登录卡片 ===== -->
+  <div id="login-view" class="login-view hidden">
+    <form id="login-form" class="login-card" autocomplete="on">
+      <div class="login-logo" aria-hidden="true">📁</div>
+      <h1 class="login-title">FileManage 管理台</h1>
+      <p class="login-sub">请使用管理员账号登录</p>
+      <div class="form-item">
+        <label for="login-username">用户名</label>
+        <input id="login-username" type="text" autocomplete="username" placeholder="管理员用户名" required>
+      </div>
+      <div class="form-item">
+        <label for="login-password">密码</label>
+        <input id="login-password" type="password" autocomplete="current-password" placeholder="登录密码" required>
+      </div>
+      <button id="login-btn" type="submit" class="btn primary block">登 录</button>
+      <!-- 0.1.0 需求32/33：降级模式不再另设入口——超级管理员（账户文件）直接在本表单登录 -->
+      <p id="login-hint" class="hint hidden"></p>
+    </form>
+  </div>
+
+  <!-- ===== 登录后：顶栏 + 左侧导航 + 内容区 ===== -->
+  <div id="admin-view" class="admin-view hidden">
+    <header class="topbar">
+      <div class="topbar-title"><span class="logo-dot"></span>FileManage 管理台</div>
+      <div class="topbar-right">
+        <span id="current-user" class="current-user"></span>
+        <button id="logout-btn" type="button" class="btn ghost sm">退出</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <!-- 左侧 tab 导航 -->
+      <nav class="sidebar" aria-label="管理台导航">
+        <button type="button" class="nav-item active" data-tab="overview">📊 概览</button>
+        <button type="button" class="nav-item" data-tab="users">👤 用户管理</button>
+        <button type="button" class="nav-item" data-tab="groups">👥 用户组</button>
+        <button type="button" class="nav-item" data-tab="acls">🔐 文件夹权限</button>
+        <button type="button" class="nav-item" data-tab="links">🔗 分享链接</button>
+        <button type="button" class="nav-item" data-tab="audits">📋 审计日志</button>
+        <button type="button" class="nav-item" data-tab="db">🗄️ 数据库</button>
+        <button type="button" class="nav-item" data-tab="super" id="nav-super" style="display:none">👑 超级管理员</button>
+      </nav>
+
+      <main class="content">
+        <!-- 概览 -->
+        <section id="tab-overview" class="tab-panel active">
+          <h2>系统概览</h2>
+          <div id="overview-grid" class="stat-grid"></div>
+          <h3 class="section-sub">根目录列表</h3>
+          <div id="overview-roots" class="roots-list"></div>
+        </section>
+
+        <!-- 用户管理 -->
+        <section id="tab-users" class="tab-panel">
+          <div class="panel-head">
+            <h2>用户管理</h2>
+            <button id="user-new-btn" type="button" class="btn primary">＋ 新建用户</button>
+          </div>
+          <div class="card table-wrap">
+            <table>
+              <thead>
+                <tr><th>ID</th><th>用户名</th><th>角色</th><th>已分配目录</th><th>创建时间</th><th>操作</th></tr>
+              </thead>
+              <tbody id="users-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 用户组 -->
+        <section id="tab-groups" class="tab-panel">
+          <div class="panel-head">
+            <h2>用户组</h2>
+            <button id="group-new-btn" type="button" class="btn primary">＋ 新建用户组</button>
+          </div>
+          <div class="card table-wrap">
+            <table>
+              <thead>
+                <tr><th>ID</th><th>名称</th><th>成员</th><th>创建时间</th><th>操作</th></tr>
+              </thead>
+              <tbody id="groups-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 文件夹权限（ACL） -->
+        <section id="tab-acls" class="tab-panel">
+          <div class="panel-head">
+            <h2>文件夹权限</h2>
+            <button id="acl-new-btn" type="button" class="btn primary">＋ 新增路径规则</button>
+          </div>
+          <p class="hint">
+            ℹ️ 0.5.0 jail 模型：用户只在自己的分配目录内默认全权；分享给特定用户/组后该目录
+            会出现在对方 roots；勾选"公开（匿名访客）可查看"即进入匿名"公开共享目录"清单。
+            子目录自动继承最近祖先目录的配置（匿名永远不可下载/修改/删除）。
+          </p>
+          <div id="acl-groups" class="acl-groups"></div>
+        </section>
+
+        <!-- 分享链接 -->
+        <section id="tab-links" class="tab-panel">
+          <div class="panel-head">
+            <h2>分享链接</h2>
+            <button id="link-new-btn" type="button" class="btn primary">＋ 新建链接</button>
+          </div>
+          <div class="card table-wrap">
+            <table>
+              <thead>
+                <tr><th>链接</th><th>目标</th><th>密码</th><th>有效期</th><th>状态</th><th>操作</th></tr>
+              </thead>
+              <tbody id="links-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+        <!-- 审计日志（0.5.1） -->
+        <section id="tab-audits" class="tab-panel">
+          <div class="panel-head">
+            <h2>审计日志</h2>
+            <button id="audit-refresh-btn" type="button" class="btn ghost">刷新</button>
+          </div>
+          <p class="hint">ℹ️ 记录登录/账户与权限变更/删除/分享等关键安全事件，自动保留 90 天。</p>
+          <div class="card table-wrap">
+            <table>
+              <thead>
+                <tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>详情</th><th>来源 IP</th></tr>
+              </thead>
+              <tbody id="audits-tbody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 数据库（0.7.0）：状态查看 / 选型 / 测试连接 / 热切换（可选数据迁移） -->
+        <section id="tab-db" class="tab-panel">
+          <div class="panel-head">
+            <h2>数据库</h2>
+            <button id="db-refresh-btn" type="button" class="btn ghost">刷新状态</button>
+          </div>
+          <div id="db-banner"></div>
+          <div id="db-status" class="stat-grid"></div>
+
+          <div id="db-form-card" class="card hidden">
+            <h3 class="section-sub">选择 / 切换数据库</h3>
+            <div class="form-item">
+              <label for="db-driver">驱动类型</label>
+              <select id="db-driver"></select>
+            </div>
+            <div class="form-item">
+              <label for="db-dsn">DSN / 文件路径</label>
+              <input id="db-dsn" type="text" autocomplete="off" placeholder="请先选择驱动类型">
+            </div>
+            <p id="db-dsn-hint" class="hint"></p>
+            <label class="check-item"><input id="db-migrate-chk" type="checkbox"> 迁移现有数据到新库（全表复制并保留主键；仅当前已有数据库时可用）</label>
+            <label id="db-force-row" class="check-item hidden"><input id="db-force-chk" type="checkbox"> 强制：目标库非空仍然迁移</label>
+            <div class="form-item">
+              <button id="db-test-btn" type="button" class="btn ghost">测试连接</button>
+              <button id="db-connect-btn" type="button" class="btn primary">连接 / 切换</button>
+            </div>
+            <p class="hint">ℹ️ 切换即时生效（无需重启）：旧库的登录会话随之失效需重新登录（勾选迁移时会话一并搬迁可保留）；配置将写回 server.json（自动 .bak 备份）。热切换仅作用于本进程，多实例请逐台执行或重启。</p>
+          </div>
+
+          <div id="db-tables" class="card hidden">
+            <h3 class="section-sub">表行数</h3>
+            <div id="db-tables-body" class="mono small"></div>
+          </div>
+        </section>
+
+        <!-- 超级管理员（0.1.0 需求32/33/34）：超管账户由服务端文件管理，仅此页维护 -->
+        <section id="tab-super" class="tab-panel">
+          <h2>超级管理员</h2>
+          <div id="super-banner"></div>
+          <div id="super-status" class="stat-grid"></div>
+          <div class="card">
+            <h3 class="section-sub">账户信息</h3>
+            <div class="form-item">
+              <label>账户名</label>
+              <input id="super-username" type="text" autocomplete="off" placeholder="（加载中…）">
+            </div>
+            <div class="form-item">
+              <label>新密码 <span class="muted">（留空表示不修改；保存后为明文，首次登录后自动转密文）</span></label>
+              <input id="super-password" type="text" autocomplete="new-password" placeholder="至少 6 位">
+            </div>
+            <div class="form-item">
+              <label>当前口令状态</label>
+              <div id="super-pw-state" class="hint">加载中…</div>
+            </div>
+            <button id="super-save-btn" type="button" class="btn primary">保存</button>
+            <p class="hint">ℹ️ 超级管理员账户存储于服务端数据目录下的 <code>admin-account.json</code>（不在数据库中）。修改账户名或密码后当前登录令牌会自动续期；也可通过直接编辑该文件或配置 <code>adminPassword</code> 字段来重置口令（详见管理文档）。仅超管本人可访问本页，其他管理员不可触达超管。</p>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- ===== 通用模态框（mask + card，内容由 JS 填充） ===== -->
+  <div id="modal-mask" class="modal-mask hidden">
+    <div class="modal-card" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h3 id="modal-title">标题</h3>
+        <button id="modal-close" type="button" class="modal-close" title="关闭" aria-label="关闭">×</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+      <div id="modal-foot" class="modal-foot"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

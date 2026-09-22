@@ -1,0 +1,862 @@
+// sqlstore.go：Store 接口的唯一 SQL 实现（sqlite3/mysql/postgresql 共用）。
+// 0.6.0（需求2）：数据操作一律经 gorm 框架（行对象映射见 rows.go）；
+// 建表/迁移仍走 dialect_*.go 的幂等 DDL（需求25：sqlite 既有 .db 文件字节兼容，
+// 只增不改，不使用 gorm AutoMigrate）。upsert 经 clause.OnConflict 由 gorm 按
+// 方言渲染（sqlite/pg ON CONFLICT、mysql ON DUPLICATE KEY UPDATE），语义与
+// 0.5.x 的 upsertSuffix 一致。唯一约束冲突经 TranslateError/文本兜底统一映射为
+// ErrExists，记录不存在统一 ErrNotFound。
+package store
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	glebarezsqlite "github.com/glebarez/sqlite"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
+)
+
+type sqlStore struct {
+	db *gorm.DB
+	d  *dialect
+}
+
+func newSQLStore(driver, dsn string) (Store, error) {
+	d, err := newDialect(driver)
+	if err != nil {
+		return nil, err
+	}
+	fullDSN := d.normalizeDSN(dsn)
+	var dialector gorm.Dialector
+	switch d.name {
+	case DriverSQLite:
+		dialector = glebarezsqlite.Open(fullDSN) // 纯 Go（modernc 同源），无 CGO
+	case DriverMySQL:
+		dialector = mysql.Open(fullDSN)
+	case DriverPg:
+		dialector = postgres.Open(fullDSN)
+	default:
+		return nil, fmt.Errorf("store: no gorm dialector for driver %q", d.name)
+	}
+	db, err := gorm.Open(dialector, &gorm.Config{
+		TranslateError: true, // 唯一键/未找到 → gorm.ErrDuplicatedKey/ErrRecordNotFound
+		Logger:         logger.Default.LogMode(logger.Warn),
+	})
+	if err != nil { // 启动即暴露连接/DSN 错误，不留到首个请求
+		return nil, fmt.Errorf("store: connect %s: %w", d.name, err)
+	}
+	if d.name == DriverSQLite {
+		if raw, err := db.DB(); err == nil {
+			raw.SetMaxOpenConns(1) // sqlite 单写者，避免锁冲突
+		}
+	}
+	return &sqlStore{db: db, d: d}, nil
+}
+
+func (s *sqlStore) Driver() string { return s.d.name }
+
+// Ping 连通性探测（0.7.0 管理台数据库状态卡；实现 store.pinger）。
+func (s *sqlStore) Ping() error {
+	raw, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	return raw.Ping()
+}
+
+func (s *sqlStore) Close() error {
+	raw, err := s.db.DB()
+	if err != nil {
+		return nil
+	}
+	return raw.Close()
+}
+
+// Migrate 执行幂等建表 DDL（不 AutoMigrate，保持已发布表字节兼容）。
+func (s *sqlStore) Migrate() error {
+	for _, q := range s.d.ddl {
+		if err := s.db.Exec(q).Error; err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	return nil
+}
+
+// ---------- 错误/结果映射 ----------
+
+// mapErr 把 gorm 哨兵错误翻译为 Store 契约错误；唯一键冲突额外做文本兜底
+// （TranslateError 未覆盖的驱动路径保持与 0.5.x 相同的 ErrExists 语义）。
+func mapErr(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return ErrNotFound
+	case errors.Is(err, gorm.ErrDuplicatedKey):
+		return ErrExists
+	case isUniqueText(err):
+		return ErrExists
+	default:
+		return err
+	}
+}
+
+// isUniqueText 三驱动唯一约束报错文本兜底（mysql 1062 / sqlite UNIQUE constraint
+// failed / postgres duplicate key value）。
+func isUniqueText(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return mysqlUnique(err) ||
+		strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "duplicate key value")
+}
+
+// affectedG 更新/删除零行 → ErrNotFound（与 0.5.x affected() 同语义）。
+func affectedG(res *gorm.DB) error {
+	if res.Error != nil {
+		return mapErr(res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// upsert 构造按冲突列覆盖指定列的 OnConflict 子句。
+func upsert(conflict, set []string) clause.OnConflict {
+	cols := make([]clause.Column, 0, len(conflict))
+	for _, c := range conflict {
+		cols = append(cols, clause.Column{Name: c})
+	}
+	return clause.OnConflict{Columns: cols, DoUpdates: clause.AssignmentColumns(set)}
+}
+
+// ---------- users ----------
+
+func (s *sqlStore) CreateUser(u *User) error {
+	if u.CreatedAt.IsZero() {
+		u.CreatedAt = time.Now()
+	}
+	r := userRow{}.fromUser(u)
+	r.ID = 0
+	if err := s.db.Create(&r).Error; err != nil {
+		return mapErr(err)
+	}
+	u.ID = r.ID
+	return nil
+}
+
+func (s *sqlStore) GetUserByName(username string) (*User, error) {
+	var r userRow
+	if err := s.db.Where("username = ?", username).Take(&r).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return r.toUser(), nil
+}
+
+func (s *sqlStore) GetUserByID(id int64) (*User, error) {
+	var r userRow
+	if err := s.db.Where("id = ?", id).Take(&r).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return r.toUser(), nil
+}
+
+func (s *sqlStore) ListUsers() ([]*User, error) {
+	var rows []userRow
+	if err := s.db.Order("id").Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*User, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].toUser())
+	}
+	return out, nil
+}
+
+func (s *sqlStore) UpdateUserPassword(id int64, hash string) error {
+	return affectedG(s.db.Model(&userRow{}).Where("id = ?", id).Update("password_hash", hash))
+}
+
+func (s *sqlStore) UpdateUserRoots(id int64, roots []string) error {
+	r := userRow{}.fromUser(&User{AllowedRoots: roots})
+	return affectedG(s.db.Model(&userRow{}).Where("id = ?", id).Update("allowed_roots", r.AllowedRoots))
+}
+
+func (s *sqlStore) UpdateUserRole(id int64, role string) error {
+	return affectedG(s.db.Model(&userRow{}).Where("id = ?", id).Update("role", role))
+}
+
+// DeleteUser 级联清理用户的全部关联数据（单事务，与 0.5.x 相同的删除顺序）。
+func (s *sqlStore) DeleteUser(id int64) error {
+	return mapErr(s.db.Transaction(func(tx *gorm.DB) error {
+		byUser := []any{&fileMetaRow{}, &aiDescRow{}, &trashRow{}, &sessionRow{}, &uploadRow{}, &userRootRow{}}
+		for _, m := range byUser {
+			if err := tx.Where("user_id = ?", id).Delete(m).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("subject_type = ? AND subject_id = ?", SubjectUser, id).Delete(&aclRow{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("id = ?", id).Delete(&userRow{}).Error
+	}))
+}
+
+func (s *sqlStore) CountUsers() (int64, error) {
+	var n int64
+	err := s.db.Model(&userRow{}).Count(&n).Error
+	return n, mapErr(err)
+}
+
+// ---------- user roots（0.5.0 jail 模型） ----------
+
+func (s *sqlStore) ListUserRoots(userID int64) ([]*UserRoot, error) {
+	var rows []userRootRow
+	if err := s.db.Where("user_id = ?", userID).Order("root_id, sub_path").Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*UserRoot, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
+func (s *sqlStore) ListAllUserRoots() ([]*UserRoot, error) {
+	var rows []userRootRow
+	if err := s.db.Order("user_id, root_id, sub_path").Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*UserRoot, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
+// SetUserRoots 全量替换某用户的分配（事务内先删后插，跨驱动一致）。
+func (s *sqlStore) SetUserRoots(userID int64, list []*UserRoot) error {
+	return mapErr(s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", userID).Delete(&userRootRow{}).Error; err != nil {
+			return err
+		}
+		for _, r := range list {
+			if r.RootID == "" {
+				continue
+			}
+			row := userRootRow{UserID: userID, RootID: r.RootID, SubPath: r.SubPath, Alias: r.Alias}
+			if err := tx.Create(&row).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+}
+
+// ---------- server_meta ----------
+
+func (s *sqlStore) GetMeta(key string) (string, error) {
+	var r metaKVRow
+	err := s.db.Where("mkey = ?", key).Take(&r).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", mapErr(err)
+	}
+	return r.Value, nil
+}
+
+func (s *sqlStore) SetMeta(key, value string) error {
+	err := s.db.Clauses(upsert([]string{"mkey"}, []string{"value"})).
+		Create(&metaKVRow{Mkey: key, Value: value}).Error
+	return mapErr(err)
+}
+
+// ---------- file metas ----------
+
+func (s *sqlStore) PutFileMeta(m *FileMeta) error {
+	if m.UpdatedAt.IsZero() {
+		m.UpdatedAt = time.Now()
+	}
+	row := fileMetaRow{}.fromMeta(m)
+	err := s.db.Clauses(upsert([]string{"user_id", "root_id", "path"},
+		[]string{"name", "is_dir", "size", "mtime", "kind", "content_hash", "updated_at"})).
+		Create(&row).Error
+	return mapErr(err)
+}
+
+func (s *sqlStore) GetFileMeta(userID int64, rootID, path string) (*FileMeta, error) {
+	var r fileMetaRow
+	err := s.db.Where("user_id = ? AND root_id = ? AND path = ?", userID, rootID, path).Take(&r).Error
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return r.to(), nil
+}
+
+func (s *sqlStore) ListFileMetas(userID int64, rootID string) ([]*FileMeta, error) {
+	q := s.db.Where("user_id = ?", userID)
+	if rootID != "" {
+		q = q.Where("root_id = ?", rootID)
+	}
+	var rows []fileMetaRow
+	if err := q.Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*FileMeta, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
+func (s *sqlStore) DeleteFileMeta(userID int64, rootID, path string) error {
+	return affectedG(s.db.Where("user_id = ? AND root_id = ? AND path = ?", userID, rootID, path).
+		Delete(&fileMetaRow{}))
+}
+
+func (s *sqlStore) RenameFileMeta(userID int64, rootID, from, to string) error {
+	return affectedG(s.db.Model(&fileMetaRow{}).
+		Where("user_id = ? AND root_id = ? AND (path = ? OR path LIKE ?)", userID, rootID, from, from+"/%").
+		Updates(map[string]any{"path": to, "updated_at": time.Now()}))
+}
+
+// ---------- ai descriptions ----------
+
+func (s *sqlStore) SaveAIDescription(d *AIDescription) error {
+	now := time.Now()
+	if d.CreatedAt.IsZero() {
+		d.CreatedAt = now
+	}
+	d.UpdatedAt = now
+	row := aiDescRow{}.fromDesc(d)
+	row.ID = 0
+	err := s.db.Clauses(upsert([]string{"user_id", "root_id", "path", "kind"},
+		[]string{"name", "text", "model", "embedding", "updated_at"})).
+		Create(&row).Error
+	if err != nil {
+		return mapErr(err)
+	}
+	d.ID = row.ID
+	return nil
+}
+
+func (s *sqlStore) GetAIDescription(userID int64, rootID, path, kind string) (*AIDescription, error) {
+	var r aiDescRow
+	err := s.db.Where("user_id = ? AND root_id = ? AND path = ? AND kind = ?", userID, rootID, path, kind).
+		Take(&r).Error
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return r.to(), nil
+}
+
+func (s *sqlStore) ListAIDescriptions(userID int64, rootID string) ([]*AIDescription, error) {
+	q := s.db.Where("user_id = ?", userID)
+	if rootID != "" {
+		q = q.Where("root_id = ?", rootID)
+	}
+	var rows []aiDescRow
+	if err := q.Order("updated_at DESC").Limit(1000).Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*AIDescription, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
+func (s *sqlStore) DeleteAIDescription(id int64) error {
+	return affectedG(s.db.Where("id = ?", id).Delete(&aiDescRow{}))
+}
+
+func (s *sqlStore) SearchDescriptions(userID int64, text string, limit int) ([]*SearchHit, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	// ESCAPE '/' 三驱动通用（原 ESCAPE '\' 在 mysql 下为非法转义）；'_' 一并转义。
+	like := "%" + escapeLike(text) + "%"
+	var rows []aiDescRow
+	err := s.db.Where("user_id = ?", userID).
+		Where("text LIKE ? ESCAPE '/' OR name LIKE ? ESCAPE '/'", like, like).
+		Order("updated_at DESC").Limit(limit).Find(&rows).Error
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*SearchHit, 0, len(rows))
+	for i := range rows {
+		out = append(out, &SearchHit{AIDescription: *rows[i].to(), Score: 1})
+	}
+	return out, nil
+}
+
+// ---------- trash ----------
+
+func (s *sqlStore) AddTrashItem(t *TrashItem) error {
+	if t.DeletedAt.IsZero() {
+		t.DeletedAt = time.Now()
+	}
+	row := trashRow{}.fromTrash(t)
+	row.ID = 0
+	if err := s.db.Create(&row).Error; err != nil {
+		return mapErr(err)
+	}
+	t.ID = row.ID
+	return nil
+}
+
+func (s *sqlStore) ListTrashItems(userID int64, rootID string) ([]*TrashItem, error) {
+	q := s.db.Where("user_id = ?", userID)
+	if rootID != "" {
+		q = q.Where("root_id = ?", rootID)
+	}
+	var rows []trashRow
+	if err := q.Order("deleted_at DESC").Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*TrashItem, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
+// TakeTrashItem 原子地取出并删除条目（事务内 SELECT+DELETE，防止并发双还原）。
+func (s *sqlStore) TakeTrashItem(userID int64, trashID string) (*TrashItem, error) {
+	var t *TrashItem
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var r trashRow
+		if err := tx.Where("user_id = ? AND trash_id = ?", userID, trashID).Take(&r).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("id = ?", r.ID).Delete(&trashRow{}).Error; err != nil {
+			return err
+		}
+		t = r.to()
+		return nil
+	})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return t, nil
+}
+
+func (s *sqlStore) RemoveTrashItem(userID int64, trashID string) error {
+	return affectedG(s.db.Where("user_id = ? AND trash_id = ?", userID, trashID).Delete(&trashRow{}))
+}
+
+func (s *sqlStore) ClearTrash(userID int64, rootID string) ([]*TrashItem, error) {
+	items, err := s.ListTrashItems(userID, rootID)
+	if err != nil {
+		return nil, err
+	}
+	q := s.db.Where("user_id = ?", userID)
+	if rootID != "" {
+		q = q.Where("root_id = ?", rootID)
+	}
+	if err := q.Delete(&trashRow{}).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return items, nil
+}
+
+func (s *sqlStore) ListTrashBefore(before time.Time) ([]*TrashItem, error) {
+	var rows []trashRow
+	if err := s.db.Where("deleted_at < ?", before).Order("deleted_at").Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*TrashItem, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
+// ---------- groups（表名 gorm 按方言自动引用） ----------
+
+func (s *sqlStore) CreateGroup(g *Group) error {
+	if g.CreatedAt.IsZero() {
+		g.CreatedAt = time.Now()
+	}
+	row := groupRow{}.fromGroup(g)
+	row.ID = 0
+	if err := s.db.Create(&row).Error; err != nil {
+		return mapErr(err)
+	}
+	g.ID = row.ID
+	return nil
+}
+
+func (s *sqlStore) GetGroupByID(id int64) (*Group, error) {
+	var r groupRow
+	if err := s.db.Where("id = ?", id).Take(&r).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return r.to(), nil
+}
+
+func (s *sqlStore) GetGroupByName(name string) (*Group, error) {
+	var r groupRow
+	if err := s.db.Where("name = ?", name).Take(&r).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return r.to(), nil
+}
+
+func (s *sqlStore) ListGroups() ([]*Group, error) {
+	var rows []groupRow
+	if err := s.db.Order("id").Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*Group, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
+func (s *sqlStore) UpdateGroup(g *Group) error {
+	row := groupRow{}.fromGroup(g)
+	return affectedG(s.db.Model(&groupRow{}).Where("id = ?", g.ID).
+		Updates(map[string]any{"name": g.Name, "members": row.Members}))
+}
+
+func (s *sqlStore) DeleteGroup(id int64) error {
+	return affectedG(s.db.Where("id = ?", id).Delete(&groupRow{}))
+}
+
+// ---------- 目录权限（ACL） ----------
+
+func (s *sqlStore) SetFolderACL(a *FolderACL) error {
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = time.Now()
+	}
+	row := aclRow{}.fromACL(a)
+	row.ID = 0
+	err := s.db.Clauses(upsert([]string{"root_id", "path", "subject_type", "subject_id"},
+		[]string{"can_view", "can_download", "can_upload", "can_delete", "can_share", "created_by"})).
+		Create(&row).Error
+	if err != nil {
+		return mapErr(err)
+	}
+	if a.ID == 0 {
+		a.ID = row.ID
+	}
+	return nil
+}
+
+func (s *sqlStore) GetFolderACLs(rootID, path string) ([]*FolderACL, error) {
+	var rows []aclRow
+	if err := s.db.Where("root_id = ? AND path = ?", rootID, path).Order("id").Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return aclList(rows), nil
+}
+
+func (s *sqlStore) ListRootACLs(rootID string) ([]*FolderACL, error) {
+	q := s.db.Model(&aclRow{})
+	if rootID != "" {
+		q = q.Where("root_id = ?", rootID)
+	}
+	var rows []aclRow
+	if err := q.Order("root_id, path, id").Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return aclList(rows), nil
+}
+
+func aclList(rows []aclRow) []*FolderACL {
+	out := make([]*FolderACL, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out
+}
+
+// ListPublicViewACLs public 主体且 view=1 的条目（公开共享目录清单，0.5.0）。
+func (s *sqlStore) ListPublicViewACLs() ([]*FolderACL, error) {
+	var rows []aclRow
+	err := s.db.Where("subject_type = ? AND can_view = 1", SubjectPublic).
+		Order("root_id, path, id").Find(&rows).Error
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return aclList(rows), nil
+}
+
+func (s *sqlStore) DeleteFolderACL(id int64) error {
+	return affectedG(s.db.Where("id = ?", id).Delete(&aclRow{}))
+}
+
+func (s *sqlStore) DeleteFolderACLsBySubject(subjectType string, subjectID int64) error {
+	return mapErr(s.db.Where("subject_type = ? AND subject_id = ?", subjectType, subjectID).
+		Delete(&aclRow{}).Error)
+}
+
+// ---------- 分享链接 ----------
+
+func (s *sqlStore) CreateShareLink(l *ShareLink) error {
+	if l.CreatedAt.IsZero() {
+		l.CreatedAt = time.Now()
+	}
+	l.HasPassword = l.PasswordHash != ""
+	row := shareRow{}.fromShare(l)
+	row.ID = 0
+	if err := s.db.Create(&row).Error; err != nil {
+		return mapErr(err)
+	}
+	l.ID = row.ID
+	return nil
+}
+
+func (s *sqlStore) GetShareLinkByToken(token string) (*ShareLink, error) {
+	var r shareRow
+	if err := s.db.Where("token = ?", token).Take(&r).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return r.to(), nil
+}
+
+func (s *sqlStore) ListShareLinks(createdBy int64) ([]*ShareLink, error) {
+	q := s.db.Model(&shareRow{})
+	if createdBy > 0 {
+		q = q.Where("created_by = ?", createdBy)
+	}
+	var rows []shareRow
+	if err := q.Order("id DESC").Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*ShareLink, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
+func (s *sqlStore) UpdateShareLink(l *ShareLink) error {
+	return affectedG(s.db.Model(&shareRow{}).Where("id = ?", l.ID).
+		Updates(map[string]any{"password_hash": l.PasswordHash, "expires_at": l.ExpiresAt,
+			"disabled": b2i(l.Disabled)}))
+}
+
+func (s *sqlStore) DeleteShareLink(id int64) error {
+	return affectedG(s.db.Where("id = ?", id).Delete(&shareRow{}))
+}
+
+// ---------- 文件版本 ----------
+
+// AddFileVersion 在事务内自动分配版本号（该路径 max+1），避免并发重复。
+func (s *sqlStore) AddFileVersion(v *FileVersion) error {
+	return mapErr(s.db.Transaction(func(tx *gorm.DB) error {
+		if v.CreatedAt.IsZero() {
+			v.CreatedAt = time.Now()
+		}
+		if v.VersionNo == 0 {
+			var maxNo int64
+			if err := tx.Model(&versionRow{}).
+				Where("root_id = ? AND path = ?", v.RootID, v.Path).
+				Select("COALESCE(MAX(version_no), 0)").Scan(&maxNo).Error; err != nil {
+				return err
+			}
+			v.VersionNo = maxNo + 1
+		}
+		row := versionRow{}.fromVersion(v)
+		row.ID = 0
+		if err := tx.Create(&row).Error; err != nil {
+			return err
+		}
+		v.ID = row.ID
+		return nil
+	}))
+}
+
+func (s *sqlStore) GetFileVersion(id int64) (*FileVersion, error) {
+	var r versionRow
+	if err := s.db.Where("id = ?", id).Take(&r).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return r.to(), nil
+}
+
+func (s *sqlStore) ListFileVersions(rootID, path string) ([]*FileVersion, error) {
+	var rows []versionRow
+	err := s.db.Where("root_id = ? AND path = ?", rootID, path).Order("version_no DESC").Find(&rows).Error
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*FileVersion, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
+func (s *sqlStore) DeleteFileVersion(id int64) error {
+	return affectedG(s.db.Where("id = ?", id).Delete(&versionRow{}))
+}
+
+// DeleteFileVersions 删除该路径（含子路径）的全部版本记录。
+func (s *sqlStore) DeleteFileVersions(rootID, path string) error {
+	return mapErr(s.db.Where("root_id = ? AND (path = ? OR path LIKE ?)", rootID, path, path+"/%").
+		Delete(&versionRow{}).Error)
+}
+
+// ---------- 登录会话 ----------
+
+func (s *sqlStore) CreateSession(sess *Session) error {
+	now := time.Now()
+	if sess.CreatedAt.IsZero() {
+		sess.CreatedAt = now
+	}
+	if sess.LastUsedAt.IsZero() {
+		sess.LastUsedAt = now
+	}
+	row := sessionRow{}.fromSession(sess)
+	row.ID = 0
+	if err := s.db.Create(&row).Error; err != nil {
+		return mapErr(err)
+	}
+	sess.ID = row.ID
+	return nil
+}
+
+func (s *sqlStore) GetSessionByTokenHash(tokenHash string) (*Session, error) {
+	var r sessionRow
+	if err := s.db.Where("token_hash = ?", tokenHash).Take(&r).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return r.to(), nil
+}
+
+func (s *sqlStore) RenewSession(id int64, expiresAt, lastUsedAt time.Time) error {
+	return affectedG(s.db.Model(&sessionRow{}).Where("id = ?", id).
+		Updates(map[string]any{"expires_at": expiresAt, "last_used_at": lastUsedAt}))
+}
+
+func (s *sqlStore) DeleteSession(id int64) error {
+	return affectedG(s.db.Where("id = ?", id).Delete(&sessionRow{}))
+}
+
+func (s *sqlStore) DeleteSessionsByUser(userID int64) error {
+	return mapErr(s.db.Where("user_id = ?", userID).Delete(&sessionRow{}).Error)
+}
+
+func (s *sqlStore) DeleteExpiredSessions(now time.Time) error {
+	return mapErr(s.db.Where("expires_at < ?", now).Delete(&sessionRow{}).Error)
+}
+
+// ---------- 分片上传会话 ----------
+
+func (s *sqlStore) CreateUploadSession(u *UploadSession) error {
+	now := time.Now()
+	if u.CreatedAt.IsZero() {
+		u.CreatedAt = now
+	}
+	u.UpdatedAt = now
+	if u.Status == "" {
+		u.Status = UploadStatusUploading
+	}
+	row := uploadRow{}.fromUpload(u)
+	if err := s.db.Create(&row).Error; err != nil {
+		return mapErr(err)
+	}
+	return nil
+}
+
+func (s *sqlStore) GetUploadSession(id string) (*UploadSession, error) {
+	var r uploadRow
+	if err := s.db.Where("id = ?", id).Take(&r).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return r.to(), nil
+}
+
+func (s *sqlStore) GetActiveUploadSession(rootID, path string) (*UploadSession, error) {
+	var r uploadRow
+	err := s.db.Where("root_id = ? AND path = ? AND status = ?", rootID, path, UploadStatusUploading).
+		Order("created_at DESC").Take(&r).Error
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return r.to(), nil
+}
+
+func (s *sqlStore) ListUploadSessions(userID int64) ([]*UploadSession, error) {
+	q := s.db.Model(&uploadRow{})
+	if userID > 0 {
+		q = q.Where("user_id = ?", userID)
+	}
+	var rows []uploadRow
+	if err := q.Order("created_at DESC").Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*UploadSession, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
+func (s *sqlStore) UpdateUploadSession(u *UploadSession) error {
+	u.UpdatedAt = time.Now()
+	row := uploadRow{}.fromUpload(u)
+	return affectedG(s.db.Model(&uploadRow{}).Where("id = ?", u.ID).
+		Updates(map[string]any{"size": u.Size, "content_hash": u.ContentHash, "base_hash": u.BaseHash,
+			"uploaded_chunks": row.UploadedChunks, "status": u.Status, "updated_at": u.UpdatedAt}))
+}
+
+func (s *sqlStore) DeleteUploadSession(id string) error {
+	return affectedG(s.db.Where("id = ?", id).Delete(&uploadRow{}))
+}
+
+func (s *sqlStore) DeleteUploadSessionsBefore(before time.Time) error {
+	return mapErr(s.db.Where("created_at < ? AND status != ?", before, UploadStatusUploading).
+		Delete(&uploadRow{}).Error)
+}
+
+// ---------- 审计日志（0.5.1） ----------
+
+func (s *sqlStore) AddAuditEvent(e *AuditEvent) error {
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = time.Now()
+	}
+	row := auditRow{}.fromAudit(e)
+	row.ID = 0
+	return mapErr(s.db.Create(&row).Error)
+}
+
+func (s *sqlStore) ListAuditEvents(limit int, userID int64) ([]*AuditEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	q := s.db.Model(&auditRow{})
+	if userID > 0 {
+		q = q.Where("user_id = ?", userID)
+	}
+	var rows []auditRow
+	if err := q.Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*AuditEvent, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
+func (s *sqlStore) DeleteAuditBefore(before time.Time) error {
+	return mapErr(s.db.Where("created_at < ?", before).Delete(&auditRow{}).Error)
+}
+
+// 编译期断言：sqlStore 完整实现 Store 接口。
+var _ Store = (*sqlStore)(nil)

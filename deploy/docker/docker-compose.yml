@@ -1,0 +1,104 @@
+# =============================================================================
+# docker-compose.yml —— filemanage-server 三种基础镜像的多容器编排示例（需求27/28）
+#
+# 位置：filemanageServer/deploy/docker/docker-compose.yml
+# 构建上下文为仓库根（../../.. 即 filemanage/）；0.3.0 起服务端自含元数据层，无同级模块依赖。
+#
+# ---------------------------------------------------------------------------
+# 一、"同一容器里运行几个节点"——NODES_PER_CONTAINER
+# ---------------------------------------------------------------------------
+#   每个容器内启动的 worker 节点数由环境变量 FM_NODES 控制，本文件统一映射为：
+#       FM_NODES: ${NODES_PER_CONTAINER:-2}
+#   即默认每容器 2 个节点（端口 8484、8485），容器内 balancer 监听 8480。
+#   修改方法（二选一）：
+#     1) 在本目录创建 .env 文件（推荐），内容示例：
+#            NODES_PER_CONTAINER=2
+#        docker compose 会自动读取同目录 .env 并代入 ${...} 变量。
+#     2) 启动时临时指定：
+#            NODES_PER_CONTAINER=3 docker compose up -d --build
+#   注意：镜像 EXPOSE 了 8484-8486，NODES_PER_CONTAINER>3 时节点仍会启动，
+#   只是更多端口未声明（不影响 balancer 转发，直连需自行加端口映射）。
+#
+# ---------------------------------------------------------------------------
+# 二、"一共运行几个容器"——两种做法
+# ---------------------------------------------------------------------------
+#   做法 A：--scale 横向扩容（复制同一服务的容器）
+#       docker compose up -d --scale fm-ubuntu=3
+#     ⚠ 直接 scale 会与固定端口映射（"8481:8480"）冲突，需二选一处理：
+#       A1. 端口范围映射：把 ports 改成范围，如 "8481-8491:8480"（宿主端口段
+#           要大于等于 scale 数量），compose 会为每个副本依次分配宿主端口；
+#       A2. 去掉 ports，仅走 compose 内部网络：其他容器/服务通过
+#           http://fm-ubuntu:8480 直连（服务名解析到多个副本时由 Docker DNS
+#           轮询），需要对外时再单独加一个网关容器统一暴露。
+#   做法 B：复制服务定义（本文件已给出 3 个不同基础镜像的服务；也可复制出
+#       fm-ubuntu-2、fm-ubuntu-3 …，各用不同宿主端口与命名卷），
+#       然后 docker compose up -d 即可。数量固定、端口明确的场景推荐做法 B。
+#
+# ---------------------------------------------------------------------------
+# 三、常用命令
+# ---------------------------------------------------------------------------
+#   构建并启动全部三个容器：  docker compose up -d --build
+#   查看日志：                docker compose logs -f fm-ubuntu
+#   停止并保留数据卷：        docker compose down
+#   停止并删除数据卷：        docker compose down -v
+#
+#   访问入口（balancer 端口，容器内 worker 端口未对外映射）：
+#     Ubuntu  容器 → http://127.0.0.1:8481/
+#     Debian  容器 → http://127.0.0.1:8482/
+#     Rocky   容器 → http://127.0.0.1:8483/
+# =============================================================================
+
+services:
+  # ---------- Ubuntu 22.04 容器 ----------
+  fm-ubuntu:
+    build:
+      context: ../../..                                              # 仓库根 filemanage/
+      dockerfile: filemanageServer/deploy/docker/ubuntu22.04/Dockerfile
+    image: filemanage-server:ubuntu22.04
+    environment:
+      FM_NODES: ${NODES_PER_CONTAINER:-2}   # 每容器节点数，可用 .env 覆盖
+      FM_BALANCER: "1"                      # 显式开启容器内 balancer
+      TZ: Asia/Shanghai
+    volumes:
+      - fm-ubuntu-data:/data                # 各容器使用各自命名卷，数据互不干扰
+    ports:
+      - "8481:8480"                         # 宿主 8481 → 容器内 balancer 8480
+    restart: unless-stopped
+
+  # ---------- Debian 12 容器 ----------
+  fm-debian:
+    build:
+      context: ../../..
+      dockerfile: filemanageServer/deploy/docker/debian12/Dockerfile
+    image: filemanage-server:debian12
+    environment:
+      FM_NODES: ${NODES_PER_CONTAINER:-2}
+      FM_BALANCER: "1"
+      TZ: Asia/Shanghai
+    volumes:
+      - fm-debian-data:/data
+    ports:
+      - "8482:8480"                         # 宿主 8482 → 容器内 balancer 8480
+    restart: unless-stopped
+
+  # ---------- Rocky Linux 9 容器 ----------
+  fm-rocky:
+    build:
+      context: ../../..
+      dockerfile: filemanageServer/deploy/docker/rockylinux/Dockerfile
+    image: filemanage-server:rockylinux
+    environment:
+      FM_NODES: ${NODES_PER_CONTAINER:-2}
+      FM_BALANCER: "1"
+      TZ: Asia/Shanghai
+    volumes:
+      - fm-rocky-data:/data
+    ports:
+      - "8483:8480"                         # 宿主 8483 → 容器内 balancer 8480
+    restart: unless-stopped
+
+# 三个容器各自的命名卷（持久化 /data：配置、sqlite 库、文件、回收站、暂存、版本）
+volumes:
+  fm-ubuntu-data:
+  fm-debian-data:
+  fm-rocky-data:
