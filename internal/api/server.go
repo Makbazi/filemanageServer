@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -45,6 +46,13 @@ type Server struct {
 
 	// Super 超级管理员账户（0.1.0 需求32：文件承载、不进数据库、无库降级模式同样可用）
 	Super *superadmin.Store
+
+	// 0.1.1 维护暂停（需求：切换/迁移/导出前后数据一致性）：
+	// manualPause = 管理台"暂停客户端"开关；autoPause = connect(含迁移)/export
+	// 复制窗口内自动屏障（defer 释放）。任一置位 → 用户端口与业务管理组 503，
+	// health / 版本发现 / /admin/db 配置面 / 超管页始终可用（操作员不被锁死）。
+	manualPause atomic.Bool
+	autoPause   atomic.Bool
 
 	startedAt time.Time
 }
@@ -164,6 +172,23 @@ func (s *Server) requireLoginUser(c *gin.Context) *store.User {
 // dbReady 报告元数据库是否可用（0.7.0：经 store.Proxy 动态判定，
 // 管理台热切换后自动跟随；替代旧 `Store == nil` 启动期判定）。
 func (s *Server) dbReady() bool { return !store.Degraded(s.Store) }
+
+// Paused 报告维护暂停是否生效（手动开关 或 迁移/导出自动屏障，0.1.1）。
+func (s *Server) Paused() bool { return s.manualPause.Load() || s.autoPause.Load() }
+
+// SetManualPause 管理台"暂停客户端操作"开关（/admin/db/pause）。
+func (s *Server) SetManualPause(v bool) bool {
+	s.manualPause.Store(v)
+	return s.Paused()
+}
+
+// withAutoPause 在屏障内执行 fn（复制→换入/导出全程冻结客户端），返回 fn 的结果；
+// 手动暂停标志与本次屏障无关（defer 只恢复 autoPause）。
+func (s *Server) withAutoPause(fn func() error) error {
+	s.autoPause.Store(true)
+	defer s.autoPause.Store(false)
+	return fn()
+}
 
 // audit 写审计日志（0.5.1：登录/账户/权限/删除/分享等关键事件）。
 // 降级模式（无库）静默跳过；任何写入失败只记日志，绝不影响主流程。

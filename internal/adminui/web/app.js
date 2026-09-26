@@ -915,6 +915,7 @@ const AUDIT_ACTIONS = {
   share_create: ["创建分享", "blue"], share_delete: ["删除分享", "gray"],
   file_delete: ["删除入回收站", "red"], rollback: ["版本回滚", "purple"],
   db_switch: ["切换数据库", "purple"], db_disconnect: ["断开数据库", "red"], db_unlock_fail: ["配库解锁失败", "red"],
+  db_export: ["导出到文件存储", "blue"], db_pause: ["暂停客户端", "orange"], db_resume: ["恢复客户端", "green"],
   super_update: ["超管账户变更", "purple"],
 };
 
@@ -983,8 +984,9 @@ async function loadDbTab() {
 
 function updateDbDsnHint() {
   const d = (dbDrivers || []).find((x) => x.id === $("#db-driver").value);
-  $("#db-dsn").placeholder = !d || d.id === "none" ? "断开数据库无需 DSN" : (d.dsnHint || "");
-  $("#db-dsn").disabled = !!d && d.id === "none";
+  const isFile = !!d && d.id === "file";
+  $("#db-dsn").placeholder = isFile ? "留空 = <dataDir>/filestore" : (d ? d.dsnHint || "" : "请先选择驱动类型");
+  $("#db-dsn").disabled = false; // 0.1.1 file 驱动可留空但不再禁用输入
   $("#db-dsn-hint").textContent = d ? (d.dsnHint || "") : "";
 }
 
@@ -1001,6 +1003,7 @@ function renderDb() {
 
   const cards = [
     statCard("数据库状态", st.configured ? '<span class="badge green">已连接</span>' : '<span class="badge yellow">降级模式（无库）</span>'),
+    statCard("客户端操作", st.paused ? '<span class="badge red">维护暂停中</span>' : '<span class="badge green">正常</span>'),
     statCard("数据目录 dataDir", `<span class="mono small">${esc(st.dataDir || "-")}</span>`),
     statCard("用户主目录", `<span class="mono small">${esc(st.usersDir || "-")}</span>`),
     statCard("配置 Schema", esc(st.schemaVersion ?? "-")),
@@ -1008,10 +1011,12 @@ function renderDb() {
   ];
   if (st.access && st.configured) {
     cards.push(statCard("驱动", esc(st.driver || "-")));
-    cards.push(statCard("DSN（脱敏）", `<span class="mono small">${esc(st.dsn || "-")}</span>`));
+    cards.push(statCard(st.driver === "file" ? "存储目录（脱敏）" : "DSN（脱敏）", `<span class="mono small">${esc(st.dsn || "-")}</span>`));
     cards.push(statCard("连通性", st.connected ? '<span class="badge green">正常</span>' : '<span class="badge red">失败</span>'));
   }
   $("#db-status").innerHTML = cards.join("");
+  const pauseBtn = $("#db-pause-btn");
+  if (pauseBtn) pauseBtn.textContent = st.paused ? "恢复客户端操作" : "暂停客户端操作";
 
   $("#db-form-card").classList.toggle("hidden", !st.access);
   if (st.access) {
@@ -1038,7 +1043,7 @@ function renderDb() {
 async function dbTest() {
   const driver = $("#db-driver").value;
   const dsn = $("#db-dsn").value.trim();
-  if (driver === "none") { toast("降级模式无连接可测", false); return; }
+  if (driver === "file") { toast("文件存储无需测连（切换时自动创建/校验目录）", false); return; }
   if (!dsn) { toast("请输入 DSN / 文件路径", false); return; }
   $("#db-test-btn").disabled = true;
   try {
@@ -1053,31 +1058,61 @@ async function dbConnect() {
   const dsn = $("#db-dsn").value.trim();
   const migrate = $("#db-migrate-chk").checked && !$("#db-migrate-chk").disabled;
   const force = $("#db-force-chk").checked;
-  if (driver !== "none" && !dsn) { toast("请输入 DSN / 文件路径", false); return; }
-  if (driver === "none" && !confirm("确定断开数据库、回到降级模式（仅匿名浏览）？登录状态将失效。")) return;
-  if (migrate && !confirm("切换将把全部元数据复制到新库并立即热生效（旧库不受影响；未迁移时所有登录失效需重登）。确认继续？")) return;
+  if (driver !== "file" && !dsn) { toast("请输入 DSN / 文件路径", false); return; }
+  if (driver === "file" && !migrate && !confirm("切换到文件存储将加载该目录既有数据（不勾选迁移则不复制当前库数据）。确认继续？")) return;
+  if (migrate && !confirm("切换将把全部元数据复制到新存储并立即热生效（复制期间自动暂停客户端操作；旧库不受影响；未迁移时所有登录失效需重登）。确认继续？")) return;
   $("#db-connect-btn").disabled = true;
   try {
     const res = await dbApi("/connect", { method: "POST", body: { driver, dsn, migrate, force } });
     if (res.warning) toast(res.warning, false);
     else if (res.migrated) toast(`已切换并迁移 ${Object.values(res.migrated).reduce((a, b) => a + b, 0)} 行元数据`);
-    else if (res.degraded) toast("已断开数据库，回到降级模式");
-    else toast("数据库已连接/切换 ✓");
+    else if (res.degraded) toast("存储不可用（异常路径），依赖元数据的端点暂时 503");
+    else toast("存储已连接/切换 ✓");
     serverInfo = null;
     $("#db-force-row").classList.add("hidden");
     $("#db-force-chk").checked = false;
     // 会话校验（0.1.0 需求33）：超管令牌走账户文件纪元、不随库失效；
-    // 数据库管理员的会话存在旧库——未迁移或断开时其登录态作废。
+    // 数据库管理员的会话存在旧库——未迁移时其登录态作废。
     if (token && currentUser && !currentUser.super && (res.degraded || !res.migrated)) forceLogout();
     await loadDbTab();
-    await refreshTabAccess(); // 配库/断开后页签可见性联动（降级 ⇄ 有库）
+    await refreshTabAccess(); // 配库后页签可见性联动
     if (!token) await updateLoginView();
   } catch (e) {
     if (e.status === 409) {
       $("#db-force-row").classList.remove("hidden");
-      toast("目标库非空——如确需迁入请勾选“强制”后重试", false);
+      toast("目标存储非空——如确需迁入请勾选“强制”后重试", false);
     }
   } finally { $("#db-connect-btn").disabled = false; }
+}
+
+// dbExport 0.1.1 纯导出：当前库全表复制到文件存储目录，不切换引擎。
+async function dbExport() {
+  const dsn = $("#db-dsn").value.trim(); // 复用表单目录字段（留空=<dataDir>/filestore）
+  const force = $("#db-export-force-chk").checked;
+  if (!confirm(`将当前存储全部元数据导出到文件存储（${dsn || "<dataDir>/filestore"}），导出期间自动暂停客户端操作。确认继续？`)) return;
+  $("#db-export-btn").disabled = true;
+  try {
+    const res = await dbApi("/export", { method: "POST", body: { dsn, force } });
+    toast(`导出完成：${Object.values(res.exported).reduce((a, b) => a + b, 0)} 行 → ${res.dir}（引擎未切换）`);
+  } catch (e) {
+    if (e.status === 409) {
+      $("#db-export-force-chk").checked = true;
+      toast("目标文件存储非空——已勾选“清空覆盖”，确认后重试", false);
+    }
+  } finally { $("#db-export-btn").disabled = false; }
+}
+
+// dbPauseToggle 0.1.1 手动维护屏障开关（可选中断按钮）。
+async function dbPauseToggle() {
+  const next = !(dbStatus && dbStatus.paused);
+  $("#db-pause-btn").disabled = true;
+  try {
+    const res = await dbApi("/pause", { method: "POST", body: { paused: next } });
+    toast(next ? "已暂停客户端一切操作（管理台配置面仍可用）" : "客户端操作已恢复");
+    dbStatus = Object.assign({}, dbStatus, { paused: res.paused });
+    renderDb();
+  } catch (e) { /* 已弹提示 */ }
+  finally { $("#db-pause-btn").disabled = false; }
 }
 
 // 登录页探测（0.1.0）：降级模式不再另设配库入口——用超管账户登录后在"数据库"页配库。
@@ -1161,6 +1196,8 @@ function init() {
   $("#db-driver").addEventListener("change", updateDbDsnHint);
   $("#db-test-btn").addEventListener("click", dbTest);
   $("#db-connect-btn").addEventListener("click", dbConnect);
+  $("#db-export-btn").addEventListener("click", dbExport);   // 0.1.1 纯导出
+  $("#db-pause-btn").addEventListener("click", dbPauseToggle); // 0.1.1 维护暂停开关
 
   // 超级管理员 tab（0.1.0 需求32/34）
   $("#super-save-btn").addEventListener("click", saveSuper);

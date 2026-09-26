@@ -108,8 +108,10 @@ func runWorker(cfgPath string) {
 		log.Printf("adminPassword: 已重置超级管理员 %q 的口令（明文，首次登录后转密文）；请清空配置文件中的 adminPassword 字段", name)
 	}
 
-	// 元数据库（0.3.0 起为 internal/store；未配置驱动 → 降级模式，0.3.0 需求2）。
-	// 0.7.0：外面套一层 store.Proxy——管理台"数据库"页可运行期热切换底层库
+	// 元数据库（0.3.0 起为 internal/store）。0.1.1 起未配置数据库时默认打开
+	// 内置文件存储（<dataDir>/filestore，全功能可用）——旧"降级模式"取消；
+	// 打开失败（目录损坏/被他实例 flock）仍 fail-fast 退出。
+	// 0.7.0：外面套一层 store.Proxy——管理台"数据库"页可运行期热切换底层存储
 	// （connect→建表→可选全表搬迁→原子换入）；装饰顺序 Open→Proxy→cache.Wrap(Proxy)。
 	st, err := store.Open(store.Options{Driver: cfg.DB.Driver, DSN: cfg.DB.DSN})
 	if err != nil {
@@ -140,7 +142,8 @@ func runWorker(cfgPath string) {
 			log.Printf("提示: 管理台 IP 准入为 %q（adminAccess）；对外暴露请确保超管口令足够强，或收紧为 local/custom（需求38）", cfg.AdminAccess.Mode)
 		}
 	} else {
-		log.Printf("warn: 未配置元数据库（db.driver=none），以降级模式启动：仅匿名只浏览（0.5.0 起不可下载）；登录/分享/权限/版本/回收站/AI/上传返回 503；管理台可在\"数据库\"页配置并热连接（0.7.0）")
+		// 0.1.1 正常路径不可达（无库=文件存储恒可开）；保留作纵深防御提示。
+		log.Printf("warn: 元数据存储不可用（异常路径：文件存储未打开成功？），依赖元数据的端点返回 503；管理台可在\"数据库\"页配置并热连接")
 	}
 	// 可选 redis 缓存（0.3.0，非必须）：启用时启动即 PING，连不上 fail-fast；
 	// 装饰器包在 Proxy 之上（热切换发生在其下，0.7.0）。降级模式无法启用缓存；

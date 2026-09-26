@@ -90,12 +90,13 @@ type BalancerCfg struct {
 }
 
 // DBCfg 元数据库配置（0.3.0）。Driver 取值：
-// sqlite3 | mysql | postgresql（含 sqlite/postgres/pg/mariadb 别名，见 store.Open）；
-// "none"（或 ""）= 不配置数据库，服务端以降级模式启动（仅匿名只读浏览）。
-// 0.2.x 的 json/memory 驱动已移除，旧配置由 migrate2to3 自动改写。
+// "file"（含别名 ""/"none"，0.1.1 起为默认：未配置数据库时使用内置文件存储，
+// DSN=存储目录，留空派生 <dataDir>/filestore，全功能可用、仅单实例）|
+// sqlite3 | mysql | postgresql（含 sqlite/postgres/pg/mariadb 别名，见 store.Open）。
+// 旧的"无库降级模式（仅匿名只读）"已在 0.1.1 取消；0.2.x 的 json/memory 驱动已移除。
 type DBCfg struct {
 	Driver string `json:"driver"`
-	DSN    string `json:"dsn"` // sqlite3 文件路径 / mysql 与 postgres DSN
+	DSN    string `json:"dsn"` // file=存储目录 / sqlite3 文件路径 / mysql 与 postgres DSN
 }
 
 // CacheCfg 可选 redis 缓存（0.3.0，非必须）。Enabled=false（默认）时不启用，
@@ -181,7 +182,7 @@ func DefaultConfig() *Config {
 		TLS:                TLSCfg{AutoSelfSign: true},
 		AdminAccess:        AdminAccessCfg{Mode: "local"}, // 新装默认仅本机；存量配置 migrate7to8 补 lan
 	}
-	c.DB.Driver = "sqlite3"
+	c.DB.Driver = "file" // 0.1.1：新装默认内置文件存储（配库走管理台"数据库"页，可携数据迁移）
 	c.AI.Provider = "none"
 	c.AI.MaxFileMB = 20
 	return c
@@ -277,11 +278,14 @@ func finalize(c *Config) (*Config, error) {
 	if abs, err := AbsClean(c.DataDir); err == nil {
 		c.DataDir = abs
 	}
-	// 元数据库（0.3.0）：driver 空或 "none" = 降级模式（仅匿名只读）；
+	// 元数据库（0.3.0；0.1.1 起空或 "none" = 内置文件存储，全功能可用，不再降级）；
 	// 非法值（含 0.2.x 的 json/memory）直接报错，给出明确指引。
 	dbDriver, err := store.NormalizeDriver(c.DB.Driver)
 	if err != nil {
 		return nil, err
+	}
+	if dbDriver == store.DriverFile && c.DB.DSN == "" {
+		c.DB.DSN = filepath.Join(c.DataDir, "filestore") // 文件存储目录默认（类比 sqlite 默认 DSN）
 	}
 	if dbDriver == store.DriverSQLite && c.DB.DSN == "" {
 		c.DB.DSN = filepath.Join(c.DataDir, "filemanage.db")
@@ -290,7 +294,7 @@ func finalize(c *Config) (*Config, error) {
 		return nil, fmt.Errorf("config: db.dsn is required for driver %q", c.DB.Driver)
 	}
 	if c.Cache.Enabled && dbDriver == "" {
-		return nil, fmt.Errorf("config: cache.enabled 需要已配置元数据库（降级模式下无元数据可缓存）")
+		return nil, fmt.Errorf("config: cache.enabled 需要已配置元数据存储")
 	}
 	if c.Cache.Enabled {
 		if c.Cache.Redis.Addr == "" {
@@ -470,7 +474,7 @@ func WriteExample(path string) error {
 		"lanOnly":            true,
 		"instanceId":         "node0",
 		"dataDir":            "./data",                                          // 运行数据根目录（0.7.0）：trash/staging/versions/jwt.secret/sqlite 及 Users/<用户名> 家目录的派生基准
-		"db":                 map[string]string{"driver": "sqlite3", "dsn": ""}, // dsn 留空=默认 <dataDir>/filemanage.db；"none"=降级模式（仅匿名只读）；亦支持 mysql/postgresql（可在管理台"数据库"页配置并热切换，0.7.0）
+		"db":                 map[string]string{"driver": "file", "dsn": ""}, // 默认内置文件存储（全功能，单实例）；dsn 留空=<dataDir>/filestore。配数据库（sqlite3/mysql/postgresql 或管理台"数据库"页热切换）后可携数据迁移；无库降级模式已于 0.1.1 取消
 		"cache":              map[string]any{"enabled": false, "redis": map[string]any{"addr": "127.0.0.1:6379", "password": "", "db": 0, "userTTLSeconds": 300, "aclTTLSeconds": 60}},
 		"roots":              []map[string]string{{"id": "main", "name": "主目录", "path": "./data/root-main"}},
 		"trashDir":           "./data/trash",

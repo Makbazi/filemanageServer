@@ -37,6 +37,22 @@ func (s *Server) requireDB() gin.HandlerFunc {
 	}
 }
 
+// maintenanceGate 0.1.1 维护暂停屏障：切换（含迁移）/导出窗口与手动暂停期间，
+// 冻结全部业务/管理写读端点（503），保证源/目标存储在该窗口内无并发变更。
+// 豁免：/api/v1/health（负载均衡探测）与 /api 版本发现；管理台登录与 /admin/db
+// 配置面不经本守卫（挂在各自分组之外），操作员永远可解除暂停。
+func (s *Server) maintenanceGate() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s.Paused() && c.Request.URL.Path != "/api/v1/health" {
+			writeErr(c, http.StatusServiceUnavailable,
+				errors.New("服务维护中（存储切换/数据导出进行或已手动暂停），请稍后重试"))
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 // authCtx 可选认证中间件（需求6）：
 //   - 携带有效 Bearer token → 注入登录用户；
 //   - 未携带 token → 匿名主体（由权限引擎判定可浏览范围）；

@@ -4,7 +4,7 @@
 package version
 
 // Version 服务端版本号，/api/v1/health 与 /admin 界面均引用此处。
-const Version = "0.1.0"
+const Version = "0.1.1"
 
 // 构建信息由 build.sh 在编译时经 -ldflags "-X filemanageServer/internal/version.Xxx=..."
 // 注入（可执行程序 `-v` 输出）；直接 go build 未注入时保持以下默认值。

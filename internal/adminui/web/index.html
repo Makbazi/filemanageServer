@@ -163,13 +163,20 @@
               <input id="db-dsn" type="text" autocomplete="off" placeholder="请先选择驱动类型">
             </div>
             <p id="db-dsn-hint" class="hint"></p>
-            <label class="check-item"><input id="db-migrate-chk" type="checkbox"> 迁移现有数据到新库（全表复制并保留主键；仅当前已有数据库时可用）</label>
-            <label id="db-force-row" class="check-item hidden"><input id="db-force-chk" type="checkbox"> 强制：目标库非空仍然迁移</label>
+            <label class="check-item"><input id="db-migrate-chk" type="checkbox"> 切换并迁移数据（全表复制并保留主键，与切换独立可勾；复制期间自动暂停客户端操作）</label>
+            <label id="db-force-row" class="check-item hidden"><input id="db-force-chk" type="checkbox"> 强制：目标存储非空仍然迁入</label>
             <div class="form-item">
               <button id="db-test-btn" type="button" class="btn ghost">测试连接</button>
               <button id="db-connect-btn" type="button" class="btn primary">连接 / 切换</button>
             </div>
-            <p class="hint">ℹ️ 切换即时生效（无需重启）：旧库的登录会话随之失效需重新登录（勾选迁移时会话一并搬迁可保留）；配置将写回 server.json（自动 .bak 备份）。热切换仅作用于本进程，多实例请逐台执行或重启。</p>
+            <div class="form-item">
+              <button id="db-export-btn" type="button" class="btn ghost">导出到文件存储（不切换）</button>
+              <label class="check-item"><input id="db-export-force-chk" type="checkbox"> 目标非空时清空覆盖</label>
+            </div>
+            <div class="form-item">
+              <button id="db-pause-btn" type="button" class="btn ghost">暂停客户端操作</button>
+            </div>
+            <p class="hint">ℹ️ 切换即时生效（无需重启）：旧库的登录会话随之失效需重新登录（勾选迁移时会话一并搬迁可保留）；配置将写回 server.json（自动 .bak 备份）。热切换仅作用于本进程，多实例请逐台执行或重启。文件存储驱动仅支持单实例（目录 flock 防护）；"暂停客户端操作"会冻结用户端口一切请求（含分享/上传），用于切换/导出前后的自定义一致性窗口。</p>
           </div>
 
           <div id="db-tables" class="card hidden">
