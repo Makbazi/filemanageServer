@@ -42,7 +42,9 @@ func (s *Server) AdminHandler() *gin.Engine {
 	// 需求33：超管账户页进一步收紧为仅超管本人（DB 管理员不可触达）
 	lite.GET("/super", s.requireSuperAdmin(), s.handleAdminGetSuper)
 	lite.PUT("/super", s.requireSuperAdmin(), s.handleAdminPutSuper)
-	admin := e.Group("/api/v1/admin", s.requireDB(), s.authCtx(), s.requireAdmin())
+	// 0.1.1：业务管理组同样受维护暂停屏障（迁移/导出窗口内管理写入同样破坏一致性）；
+	// lite 组（info/super）与 /admin/db 配置面不受限，操作员始终可解除暂停。
+	admin := e.Group("/api/v1/admin", s.requireDB(), s.authCtx(), s.requireAdmin(), s.maintenanceGate())
 	s.registerAdminAPI(admin)
 	adminui.Mount(e)
 	return e
@@ -105,7 +107,7 @@ func (s *Server) handleAPIVersions(c *gin.Context) {
 //   - admin   ：requireDB + 管理员；
 //   - share   ：分享链接匿名访问（token+密码授权，需要元数据库）。
 func (s *Server) registerV1(e *gin.Engine) {
-	v1 := e.Group("/api/v1")
+	v1 := e.Group("/api/v1", s.maintenanceGate()) // 0.1.1：组内统一维护暂停屏障（health 豁免）
 
 	// ---- 公开 ----
 	v1.GET("/health", s.handleHealth)
@@ -116,7 +118,7 @@ func (s *Server) registerV1(e *gin.Engine) {
 	v1.POST("/auth/refresh", s.requireDB(), s.handleRefresh)
 
 	// ---- 分享链接匿名访问（需求7，凭 token+密码，无需登录）----
-	shr := e.Group("/s/:token", s.requireDB())
+	shr := e.Group("/s/:token", s.maintenanceGate(), s.requireDB())
 	shr.GET("", s.handleShareInfo)
 	shr.POST("/verify", s.handleShareVerify)
 	shr.GET("/files", s.handleShareFiles)

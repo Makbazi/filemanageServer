@@ -858,5 +858,136 @@ func (s *sqlStore) DeleteAuditBefore(before time.Time) error {
 	return mapErr(s.db.Where("created_at < ?", before).Delete(&auditRow{}).Error)
 }
 
+// ---------- 0.1.1 全表迁移通道（rowSource/rowSink，与 filecopy.go 对端） ----------
+
+// sqlScanInt/sqlScanStr：keyset 分批读（与原 copyInt/copyStr 逐字同语义）。
+func sqlScanInt[T any](s *sqlStore, keyOf func(*T) int64, emit func([]T) error) error {
+	var last int64
+	for {
+		var batch []T
+		if err := s.db.Model(new(T)).Where("id > ?", last).
+			Order("id").Limit(copyBatchSize).Find(&batch).Error; err != nil {
+			return fmt.Errorf("copy read: %w", mapErr(err))
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := emit(batch); err != nil {
+			return err
+		}
+		last = keyOf(&batch[len(batch)-1])
+		if len(batch) < copyBatchSize {
+			return nil
+		}
+	}
+}
+
+func sqlScanStr[T any](s *sqlStore, pkCol string, keyOf func(*T) string, emit func([]T) error) error {
+	last := ""
+	for {
+		var batch []T
+		if err := s.db.Model(new(T)).Where(pkCol+" > ?", last).
+			Order(pkCol).Limit(copyBatchSize).Find(&batch).Error; err != nil {
+			return fmt.Errorf("copy read: %w", mapErr(err))
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := emit(batch); err != nil {
+			return err
+		}
+		last = keyOf(&batch[len(batch)-1])
+		if len(batch) < copyBatchSize {
+			return nil
+		}
+	}
+}
+
+func (s *sqlStore) copyScan(table string, fn func(batch any) error) error {
+	emit := func(b any) error { return fn(b) }
+	switch table {
+	case "users":
+		return sqlScanInt(s, func(r *userRow) int64 { return r.ID }, func(b []userRow) error { return emit(b) })
+	case "user_roots":
+		return sqlScanInt(s, func(r *userRootRow) int64 { return r.ID }, func(b []userRootRow) error { return emit(b) })
+	case "file_metas":
+		return sqlScanInt(s, func(r *fileMetaRow) int64 { return r.ID }, func(b []fileMetaRow) error { return emit(b) })
+	case "ai_descriptions":
+		return sqlScanInt(s, func(r *aiDescRow) int64 { return r.ID }, func(b []aiDescRow) error { return emit(b) })
+	case "trash_items":
+		return sqlScanInt(s, func(r *trashRow) int64 { return r.ID }, func(b []trashRow) error { return emit(b) })
+	case "groups":
+		return sqlScanInt(s, func(r *groupRow) int64 { return r.ID }, func(b []groupRow) error { return emit(b) })
+	case "folder_acls":
+		return sqlScanInt(s, func(r *aclRow) int64 { return r.ID }, func(b []aclRow) error { return emit(b) })
+	case "share_links":
+		return sqlScanInt(s, func(r *shareRow) int64 { return r.ID }, func(b []shareRow) error { return emit(b) })
+	case "file_versions":
+		return sqlScanInt(s, func(r *versionRow) int64 { return r.ID }, func(b []versionRow) error { return emit(b) })
+	case "sessions":
+		return sqlScanInt(s, func(r *sessionRow) int64 { return r.ID }, func(b []sessionRow) error { return emit(b) })
+	case "upload_sessions":
+		return sqlScanStr(s, "id", func(r *uploadRow) string { return r.ID }, func(b []uploadRow) error { return emit(b) })
+	case "server_meta":
+		return sqlScanStr(s, "mkey", func(r *metaKVRow) string { return r.Mkey }, func(b []metaKVRow) error { return emit(b) })
+	case "audit_events":
+		return sqlScanInt(s, func(r *auditRow) int64 { return r.ID }, func(b []auditRow) error { return emit(b) })
+	}
+	return fmt.Errorf("copy: unknown table %q", table)
+}
+
+func (s *sqlStore) copyWrite(table string, batch any) error {
+	var err error
+	switch b := batch.(type) {
+	case []userRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []userRootRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []fileMetaRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []aiDescRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []trashRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []groupRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []aclRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []shareRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []versionRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []sessionRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []uploadRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []metaKVRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []auditRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	default:
+		return fmt.Errorf("copy: batch type mismatch for table %q", table)
+	}
+	if err != nil {
+		return fmt.Errorf("copy write: %w", mapErr(err))
+	}
+	return nil
+}
+
+// copyFinish postgresql 序列对齐（显式主键插入不推进 SERIAL；sqlite no-op）。
+func (s *sqlStore) copyFinish() error {
+	for _, q := range s.d.seqReset {
+		if err := s.db.Exec(q).Error; err != nil {
+			return fmt.Errorf("reset sequences: %w", mapErr(err))
+		}
+	}
+	return nil
+}
+
+var (
+	_ rowSource = (*sqlStore)(nil)
+	_ rowSink   = (*sqlStore)(nil)
+)
+
 // 编译期断言：sqlStore 完整实现 Store 接口。
 var _ Store = (*sqlStore)(nil)

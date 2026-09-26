@@ -2,8 +2,13 @@
 // 上层只依赖 Store 接口与模型类型，禁止绕过接口直接操作数据库。
 //
 // 0.3.0 变更：json/memory 驱动移除；改为 SQL 三驱动 sqlite3|mysql|postgresql，
-// 单一 sqlStore 实现 + 方言层（dialect.go）。未配置驱动（"none"）时 Open 返回
-// (nil, nil)，服务端以降级模式启动（仅匿名只读，元数据功能返回 503）。
+// 单一 sqlStore 实现 + 方言层（dialect.go）。
+//
+// 0.1.1 变更：新增 "file" 驱动（filestore.go 等）——未配置数据库时的**默认**元数据
+// 存储：二进制追加日志（op+length+data+crc 帧）+ 内存索引 + 快照压缩，全功能可用；
+// 旧配置 driver ""/"none" 一律映射到 file，**降级模式（503）自此取消**
+// （store.Degraded/requireDB 保留作打开失败等异常路径的纵深防御）。
+// file 驱动为单实例引擎：目录 flock 排他，两实例同目录并写会被拒绝启动。
 package store
 
 import (
@@ -23,6 +28,7 @@ const (
 	DriverSQLite = "sqlite3"
 	DriverMySQL  = "mysql"
 	DriverPg     = "postgresql"
+	DriverFile   = "file" // 0.1.1：无数据库默认（DSN=存储目录）
 )
 
 // 用户主目录内部合成根（0.7.0 需求3）：路径 <dataDir>/Users 由配置派生，
@@ -146,13 +152,14 @@ type Options struct {
 	DSN    string // sqlite3 文件路径 / mysql DSN / postgres DSN
 }
 
-// NormalizeDriver 将用户配置的驱动名规范为 DriverSQLite/DriverMySQL/DriverPg，
-// 或 ""（降级模式，无数据库）。json/memory 驱动已在 0.3.0 移除。
+// NormalizeDriver 将用户配置的驱动名规范为 DriverFile/DriverSQLite/DriverMySQL/DriverPg。
+// 0.1.1 起 ""/"none" 是 "file" 的别名（无数据库 = 文件存储，全功能可用；旧的
+// "返回空串进入降级模式"语义废止）。json/memory 驱动已在 0.3.0 移除。
 // 配置校验（internal/config）与 Open 共用本函数。
 func NormalizeDriver(s string) (string, error) {
 	switch s {
-	case "", "none":
-		return "", nil
+	case "", "none", "file":
+		return DriverFile, nil
 	case "sqlite", "sqlite3":
 		return DriverSQLite, nil
 	case "mysql", "mariadb":
@@ -160,9 +167,9 @@ func NormalizeDriver(s string) (string, error) {
 	case "postgres", "postgresql", "pg":
 		return DriverPg, nil
 	case "json", "memory":
-		return "", fmt.Errorf("store: driver %q was removed in 0.3.0 (configure sqlite3|mysql|postgresql, or \"none\" for degraded mode)", s)
+		return "", fmt.Errorf("store: driver %q was removed in 0.3.0 (configure sqlite3|mysql|postgresql, or \"file\"/\"none\" for the built-in file store)", s)
 	default:
-		return "", fmt.Errorf("store: unknown driver %q (want sqlite3|mysql|postgresql|none)", s)
+		return "", fmt.Errorf("store: unknown driver %q (want file|sqlite3|mysql|postgresql)", s)
 	}
 }
 
@@ -172,20 +179,19 @@ func ValidDriver(s string) bool {
 	return err == nil
 }
 
-// Open 按驱动创建 Store。
-// Driver 为 ""/none 时返回 (nil, nil)：服务端以降级模式运行（见包注释）。
+// Open 按驱动创建 Store。0.1.1 起不再有 (nil, nil) 降级返回：
+// ""/none/file → 文件存储（DSN=目录，config.finalize 默认 <dataDir>/filestore）。
 func Open(opt Options) (Store, error) {
 	driver, err := NormalizeDriver(opt.Driver)
 	if err != nil {
 		return nil, err
 	}
-	if driver == "" {
-		return nil, nil // 降级模式：无元数据库
-	}
 	if opt.DSN == "" {
 		return nil, fmt.Errorf("store: driver %q requires a dsn", driver)
 	}
 	switch driver {
+	case DriverFile:
+		return newFileStore(opt.DSN)
 	case DriverSQLite, DriverMySQL, DriverPg:
 		return newSQLStore(driver, opt.DSN)
 	default:
