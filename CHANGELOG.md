@@ -16,6 +16,15 @@
 
 ## 未发布版本
 
+### 构建体系（2026-09-27，无版本号变更/无协议影响）
+- 新增 `build-env/` 多平台**编译环境**（`Dockerfile.rockylinux9`，镜像命名规范
+  `filemanage-server-build:rockylinux9`）+ 容器内构建脚本 `container-build.sh`。
+- `build.sh` 重写为 Docker 化多平台静态构建：`-a linux|windows|arm64|all`
+  `-d debug|release`（默认 release）；产物命名 `filemanageServer_<平台>_<版本号>[.exe]`
+  输出 `build/`（debug → `build/debug/`）；三目标均 CGO_ENABLED=0 静态编译
+  （glebarez 纯 Go sqlite），版本信息注入（`-v` 可查）与旧脚本一致。
+- 旧接口 `./build.sh [-r]`（宿主直编）移除；等价 `./build.sh -a linux -d release`。
+
 ## [0.1.1] - 2026-09-23（文件元数据存储：无库不再缺功能，本批用户清单第 1 条＝需求40）
 
 ### 新增
