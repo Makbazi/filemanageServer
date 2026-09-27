@@ -11,21 +11,22 @@ FileManage 体系的服务端（gin 提供 REST API，统一 `/api/v1`）：JWT+
 ## 快速开始（Get Start）
 
 ```bash
-# 编译（Go ≥ 1.27，纯 Go 无 CGO），产物输出到脚本同级 build/ 目录
-./build.sh          # 开发构建（注入版本信息）
-./build.sh -r       # release 构建（-trimpath + 去符号 + 静态链接）
+# 编译（Docker 多平台编译环境，rockylinux:9；产物输出到脚本同级 build/ 目录）
+./build.sh -a all -d release      # linux + windows(.exe) + arm64，静态编译
+./build.sh -a linux               # 仅本机架构平台，release（默认）；-d debug → build/debug/
+# （镜像缺失自动构建；命名规范与细节见 build-env/README.md）
 
 # 查看版本信息（版本号 / git tag / commit_id / 编译时间）
-./build/filemanage-server -v
+./build/filemanageServer_linux_0.1.1 -v
 
 # 首次运行自动生成示例配置 server.json
-./build/filemanage-server -config server.json
+./build/filemanageServer_linux_0.1.1 -config server.json
 # 编辑 server.json 的 roots（至少一个根目录）后重启
 ```
 
 **首次上手（约 3 分钟）：**
 
-1. 编译并运行：`./build.sh && ./build/filemanage-server -config server.json`
+1. 编译并运行：`./build.sh -a linux && ./build/filemanageServer_linux_0.1.1 -config server.json`
    —— 首启自动生成示例配置并在 `dataDir`（默认 `./data`）下生成**超级管理员账户文件**
    `admin-account.json`；
 2. 编辑 `server.json`：至少配置一个 `roots` 条目（托管目录），按需改 `listen`/

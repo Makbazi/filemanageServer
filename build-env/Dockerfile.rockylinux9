@@ -1,0 +1,51 @@
+# =============================================================================
+# filemanage-server 编译环境镜像（多平台交叉构建，需求：服务端编译体系）
+#
+# 镜像命名规范：filemanage-server-build:<平台标签>
+#   本平台标签 = rockylinux9（当前唯一编译环境）
+# 基础镜像：rockylinux:9（需求指定；等价可用 rockylinux/rockylinux:9 持续更新版，
+#   参考 deploy/docker/rockylinux/Dockerfile 头部说明——library 标签冻结在 9.3，
+#   作纯编译环境无碍，此处按需求原文用 library 标签）
+#
+# 用途：静态编译 linux-amd64 / windows-amd64 / linux-arm64 三平台产物。
+#   三目标均为 Go 原生交叉编译（sqlite 驱动为 glebarez 纯 Go，CGO_ENABLED=0），
+#   故无需 mingw/系统库；镜像只装 Go 工具链与 git。
+#
+# 构建（在本工程根目录）：
+#   docker build -f build-env/Dockerfile.rockylinux9 -t filemanage-server-build:rockylinux9 build-env
+# 使用（通常经 ./build.sh -a <platform|all> -d <debug|release> 自动调用）：
+#   docker run --rm -v $PWD:/src -v fms-gopath:/root/go -v fms-gocache:/root/.cache/go-build \
+#     filemanage-server-build:rockylinux9 bash /src/build-env/container-build.sh "linux,arm64,windows" release
+# =============================================================================
+
+FROM rockylinux:9
+
+# git：读取 tag/commit 构建信息（宿主已算好并以环境变量传入时也可不用，保留备查）
+# tar/gzip/which：解包 Go；curl 用基础镜像自带的 curl-minimal（rocky9 中 curl 与
+# curl-minimal 互斥，显式装 curl 会触发 dnf 冲突，故不装）
+RUN dnf install -y git tar gzip which ca-certificates && dnf clean all
+
+# Go 工具链版本：与 go.mod 的 `go 1.27.1` 对齐（低于它编译直接报错）。
+# 升级 go.mod 时同步 ARG GO_VERSION。官方 tarball 直装，不依赖发行版 golang 包的新旧。
+# 多源回退：dl.google.com 为官方发布直链（本环境实测最快）；golang.google.cn /
+# mirrors.aliyun.com 兜底内网或海外站点不可达场景。
+ARG GO_VERSION=1.27.1
+RUN ok=0; \
+    for base in "https://dl.google.com/go" "https://golang.google.cn/dl" "https://mirrors.aliyun.com/golang"; do \
+        echo "try ${base}/go${GO_VERSION}.linux-amd64.tar.gz" && \
+        curl -fsSL --connect-timeout 15 --max-time 600 \
+            "${base}/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz && ok=1 && break; \
+    done; \
+    [ "$ok" = 1 ] || { echo "Go tarball 下载失败（所有镜像源）" >&2; exit 1; }; \
+    tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz && /usr/local/go/bin/go version
+
+ENV PATH=/usr/local/go/bin:/root/go/bin:${PATH}
+ENV GOFLAGS=-buildvcs=false
+# 模块代理：proxy.golang.org 在部分网络不可达（实测超时），镜像源优先 + direct 兜底
+ENV GOPROXY="https://goproxy.cn,https://mirrors.aliyun.com/goproxy/,https://proxy.golang.org,direct"
+
+# 模块缓存与构建缓存卷在运行期挂载（/root/go、/root/.cache/go-build）
+WORKDIR /src
+
+ENTRYPOINT []
+CMD ["sleep", "infinity"]

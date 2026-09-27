@@ -30,16 +30,20 @@ FileManage 服务端（Go + **gin**，module `filemanageServer`）。元数据�
 | `internal/balancer/` | 轮询反向代理 + 健康检查（`-mode balancer`） |
 | `internal/tlsx/` | 自签证书生成 |
 | `internal/version/` | `Version` 常量与 `APIVersions`；0.7.1 增 `GitTag/GitCommit/BuildTime`（build.sh 经 `-ldflags -X` 注入，`-v` 输出） |
-| `deploy/` | Docker×3 / entrypoint / compose / nginx 样例 |
+| `deploy/` | Docker×3 / entrypoint / compose / nginx 样例（**运行**镜像） |
+| `build-env/` | **编译**环境（Dockerfile.rockylinux9 + container-build.sh + README；产物规范 linux/windows(.exe)/arm64 静态编译，经 `./build.sh -a -d` 调用） |
 
 ## 运行
 
 ```bash
-./build.sh            # 开发构建（注入版本信息），产物在脚本同级 build/
-./build.sh -r         # release 构建（另加 -trimpath、-s -w 去符号、CGO_ENABLED=0 静态链接）
-./build/filemanage-server -v                            # 打印 版本号/tag/commit_id/编译时间 后退出
-./build/filemanage-server -config server.json           # worker（用户端口 + 管理端口双 listener）
-./build/filemanage-server -mode balancer -config balancer.json
+./build.sh -a all -d release    # Docker 编译环境（build-env/Dockerfile.rockylinux9，镜像
+                                # filemanage-server-build:rockylinux9，缺失自动构建）多平台静态编译：
+                                # build/filemanageServer_linux_0.1.1 / _arm64_0.1.1 / _windows_0.1.1.exe
+                                # -a 取 linux|windows|arm64|all；-d debug → build/debug/
+                                # （release: -trimpath -s -w；debug: -N -l；均 CGO_ENABLED=0 静态、均注入版本信息）
+./build/filemanageServer_linux_0.1.1 -v                            # 打印 版本号/tag/commit_id/编译时间 后退出
+./build/filemanageServer_linux_0.1.1 -config server.json           # worker（用户端口 + 管理端口双 listener）
+./build/filemanageServer_linux_0.1.1 -mode balancer -config balancer.json
 ```
 
 首次运行生成示例配置；`/api` 版本发现；`/api/v1/health` 健康检查（0.1.1 起无库默认 `db:"file"`——文件存储引擎；仅异常路径可能 `db:"none"`）。
