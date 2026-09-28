@@ -2,7 +2,9 @@
 
 > 本文件供 Claude Code 及开发者快速了解本工程。**自动更新约定（需求2）**：
 > 任何 API/配置/目录结构/行为变更，**必须在同一次改动中**同步更新本文件、
-> `README.md`（如涉及用法）、`CHANGELOG.md`（含兼容矩阵）与 `internal/version/version.go`。
+> `README.md`（如涉及用法）、`CHANGELOG.md`（含兼容矩阵）。自 0.1.1 起**产物版本号取
+> 最新 git tag**（build.sh 经 `-ldflags -X` 注入 `internal/version/version.go` 的 `Version`，
+> 其源码默认 `"unknown"`），打 tag 即定版，通常无需再手改 version.go 常量。
 
 ## 工程定位
 
@@ -29,17 +31,19 @@ FileManage 服务端（Go + **gin**，module `filemanageServer`）。元数据�
 | `internal/adminui/` | go:embed `web/`（纯手写 HTML/JS/CSS，无构建链）挂 `/admin/`（**仅管理端口**，0.5.0 含目录分配编辑器与物理根浏览器；0.7.0 "数据库"页：状态/选型/测连/热切换/迁移；**0.1.0：登录页降级提示改"以超管账户登录"（删解锁卡/引导注册卡/setup-entry/`refreshTabAccess` 按超管身份+降级态收敛页签）；新"超级管理员"页（账户名/新口令、明文有效期徽章、PUT 后换用重发令牌）；用户页管理员行编辑/删除与 role=admin 选项仅超管可用；概览加 adminAccess/超管账户名卡；0.1.1："数据库"页驱动列表含 file（无库默认，dsn 可留空=派生目录、输入框不禁用），新增"导出到文件存储（不切换）"按钮（复用 DSN 目录字段+覆盖勾选，409 自动勾覆盖）、"暂停/恢复客户端操作"按钮（状态卡新增"客户端操作"徽章 = paused）、`/status` 的 `paused` 字段驱动渲染）**） |
 | `internal/balancer/` | 轮询反向代理 + 健康检查（`-mode balancer`） |
 | `internal/tlsx/` | 自签证书生成 |
-| `internal/version/` | `Version` 常量与 `APIVersions`；0.7.1 增 `GitTag/GitCommit/BuildTime`（build.sh 经 `-ldflags -X` 注入，`-v` 输出） |
+| `internal/version/` | `Version`（`var`，源码默认 `"unknown"`，build.sh 经 `-ldflags -X` 注入 git tag 版本号）与 `APIVersions`；0.7.1 增 `GitTag/GitCommit/BuildTime`（同经 `-ldflags -X` 注入，`-v` 输出） |
 | `deploy/` | Docker×3 / entrypoint / compose / nginx 样例（**运行**镜像） |
-| `build-env/` | **编译**环境（Dockerfile.rockylinux9 + container-build.sh + README；产物规范 linux/windows(.exe)/arm64 静态编译，经 `./build.sh -a -d` 调用） |
+| `build-env/` | **编译**环境（Dockerfile.rockylinux9 + container-build.sh + README；产物规范 linux/windows(.exe)/arm64 静态编译，经 `./build.sh -a -d` 编译 / `-i` 构建镜像 / `-n` 拉取镜像调用；版本号由 git tag 推导，工作区脏带 `-dirty`） |
 
 ## 运行
 
 ```bash
-./build.sh -a all -d release    # Docker 编译环境（build-env/Dockerfile.rockylinux9，镜像
-                                # filemanage-server-build:rockylinux9，缺失自动构建）多平台静态编译：
-                                # build/filemanageServer_linux_0.1.1 / _arm64_0.1.1 / _windows_0.1.1.exe
-                                # -a 取 linux|windows|arm64|all；-d debug → build/debug/
+./build.sh -i                   # 构建编译环境镜像（docker build，不编译工程）
+./build.sh -n                   # 拉取编译环境镜像（docker pull，不编译工程）
+./build.sh -a all -d release    # Docker 编译环境（build-env/Dockerfile.rockylinux9）多平台静态编译：
+                                # 版本号取最新 git tag（去 v；工作区脏带 -dirty），非 version.go 常量
+                                # build/filemanageServer_linux_0.1.3 / _arm64_0.1.3 / _windows_0.1.3.exe
+                                # -a 取 linux|windows|arm64|all；-d debug → build/debug/；-f 强制重建镜像
                                 # （release: -trimpath -s -w；debug: -N -l；均 CGO_ENABLED=0 静态、均注入版本信息）
 ./build/filemanageServer_linux_0.1.1 -v                            # 打印 版本号/tag/commit_id/编译时间 后退出
 ./build/filemanageServer_linux_0.1.1 -config server.json           # worker（用户端口 + 管理端口双 listener）
@@ -156,7 +160,7 @@ FileManage 服务端（Go + **gin**，module `filemanageServer`）。元数据�
 
 ## 当前版本
 
-`internal/version.Version = "0.1.1"`（需求40：无数据库默认改用内置**文件存储驱动**
+`internal/version.Version`（源码默认 `"unknown"`，build 时经 `-ldflags -X` 注入 git tag 版本号；本基线对应 0.1.1）——需求40：无数据库默认改用内置**文件存储驱动**
 `file`——`internal/store/file*.go`：二进制帧 op+length+data+crc32c（CRC Castagnoli）
 追加日志 + 全内存 PK/唯一键二级索引 + 快照压缩 + MANIFEST 双代原子换 + 末段尾撕裂
 截断容忍/中段 CRC 硬失败 + 50ms 批量刷盘（账户/会话/SetMeta 等关键操作同步 fsync）+

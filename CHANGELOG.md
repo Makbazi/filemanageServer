@@ -25,6 +25,17 @@
   （glebarez 纯 Go sqlite），版本信息注入（`-v` 可查）与旧脚本一致。
 - 旧接口 `./build.sh [-r]`（宿主直编）移除；等价 `./build.sh -a linux -d release`。
 
+### 构建体系（2026-09-28，无版本号变更/无协议影响）
+- `build.sh` 新增镜像管理参数（与工程编译解耦）：`-i` **构建编译镜像**（docker build）、
+  `-n` **拉取编译镜像**（docker pull）——任一给定即只操作镜像、完成后退出，不编译工程；
+  `-f` 编译时强制重建镜像（本地缺镜像时仍自动构建）。
+- **产物版本号改由 git tag 推导**，不再取 `internal/version/version.go` 常量：
+  取最新可达 git tag（去 `v` 前缀，`git describe --tags --abbrev=0`），工作区有未提交
+  改动（跟踪文件，`git status --porcelain --untracked-files=no`）追加 `-dirty` 后缀，
+  经 `BUILD_VERSION` 传入容器并 `-ldflags -X` 注入 `version.Version`。
+  `version.Version` 由 `const` 改为 `var`、默认 `"unknown"`（`-X` 只能注入变量；直接
+  `go build` 未注入时保持 unknown，health/admin/`-v` 读取路径不变、无协议影响）。
+
 ## [0.1.1] - 2026-09-23（文件元数据存储：无库不再缺功能，本批用户清单第 1 条＝需求40）
 
 ### 新增
