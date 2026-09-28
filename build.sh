@@ -27,7 +27,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE="filemanage-server-build:rockylinux9"
+IMAGE="harbor.localserver.com:9080/filemanage/filemanage-server-build:latest"
 DOCKERFILE="build-env/Dockerfile.rockylinux9"
 VOL_GOPATH="fms-gopath"
 VOL_GOCACHE="fms-gocache"
