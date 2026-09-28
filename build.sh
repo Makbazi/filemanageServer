@@ -61,11 +61,12 @@ if [[ "$PLATFORMS" == "all" ]]; then
 fi
 
 # 镜像缺失（或 -f 强制）时自动构建（上下文取 build-env/，镜像不 COPY 工程，极小）
-if [[ "$FORCE_BUILD" -eq 1 ]] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+# if [[ "$FORCE_BUILD" -eq 1 ]] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "==> 编译环境镜像不存在，构建 $IMAGE ..."
-    docker build -f "$SCRIPT_DIR/$DOCKERFILE" -t "$IMAGE" "$SCRIPT_DIR/build-env" \
-        || { echo "!! 编译环境镜像构建失败：$IMAGE" >&2; exit 1; }
-fi
+    # docker build -f "$SCRIPT_DIR/$DOCKERFILE" -t "$IMAGE" "$SCRIPT_DIR/build-env" \
+    #     || { echo "!! 编译环境镜像构建失败：$IMAGE" >&2; exit 1; }
+# fi
+docker pull $IMAGE
 
 # 版本信息注入源（宿主 git 计算，避免容器内 dubious ownership 问题）
 cd "$SCRIPT_DIR"
