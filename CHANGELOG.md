@@ -35,6 +35,10 @@
   经 `BUILD_VERSION` 传入容器并 `-ldflags -X` 注入 `version.Version`。
   `version.Version` 由 `const` 改为 `var`、默认 `"unknown"`（`-X` 只能注入变量；直接
   `go build` 未注入时保持 unknown，health/admin/`-v` 读取路径不变、无协议影响）。
+- CI 兜底 `FM_VERSION`：Jenkins 浅克隆/未 fetch tag 会使 `git describe --tags` 失败→
+  版本号落到 `"unknown"`。设 `FM_VERSION=x.y.z ./build.sh -a all` 可跳过 git 推导固定版本
+  （此时也不追加 `-dirty`）；亦可在流水线先 `git fetch --tags --force`（浅克隆加
+  `--unshallow`）并 `git config --global --add safe.directory "$WORKSPACE"` 让 tag 真正可用。
 
 ## [0.1.1] - 2026-09-23（文件元数据存储：无库不再缺功能，本批用户清单第 1 条＝需求40）
 

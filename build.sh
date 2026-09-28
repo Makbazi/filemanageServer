@@ -3,30 +3,34 @@
 # build.sh —— filemanageServer 多平台构建脚本（Docker 编译环境版）
 #
 # 编译环境镜像（IMAGE，见 build-env/Dockerfile.rockylinux9）。全部静态编译
-# （CGO_ENABLED=0，三目标均为 Go 原生交叉）。镜像管理（-i/-n）与工程编译（-a/-d）
-# 为两类独立操作：给了 -i 或 -n 只操作镜像、不编译工程。
+# （CGO_ENABLED=0，三目标均为 Go 原生交叉）。-i 仅构建镜像后退出；-n 拉取镜像后，
+# 若同时给了 -a 会继续编译（CI 常用 ./build.sh -n -a all）。
 #
 # 用法:
 #   ./build.sh -a <平台> [-d <debug|release>]   # 编译工程
 #   ./build.sh -i                               # 构建编译镜像（不编译工程）
-#   ./build.sh -n                               # 拉取编译镜像（不编译工程）
+#   ./build.sh -n                               # 拉取编译镜像
 #     -a  编译平台：linux | windows | arm64 | all（all=三平台全出）
 #     -d  debug 或 release（默认 release）；debug 产物输出到 build/debug/，
 #         release 产物输出到 build/，文件名均保持 工程名_平台_版本号[.exe] 规范
 #     -i  构建编译环境镜像（docker build），完成后退出，不编译工程
 #     -n  拉取编译环境镜像（docker pull）编译前拉取镜像。
 #     -f  重建编译镜像（改 Dockerfile 后需要；本地缺镜像时亦会自动构建）,完成后退出，不编译工程
+#     -V <tag/版本号>  显式指定产物版本号（覆盖 git describe，可带或不带 v 前缀，不加 -dirty）
 #     -h  显示本帮助
 #
 # 示例:
-#   ./build.sh -n                # 先从仓库拉取编译镜像，不推出
+#   ./build.sh -n                # 先从仓库拉取编译镜像不推退出
 #   ./build.sh -i                # 或本地构建编译镜像，构建编译镜像后推出
 #   ./build.sh -a all            # 三平台 release → build/（本地缺镜像则自动构建）
 #   ./build.sh -a windows -d debug
+#   ./build.sh -n -a all -V v0.1.4   # CI：拉镜像+编译，版本固定为 0.1.4（tag 传参，不走 git describe）
 #
 # 产物版本号（非 version.go 常量，改由 git tag 推导并经 -ldflags 注入 version.Version）：
 #   取最新 git tag（去 v 前缀）；工作区有未提交改动（跟踪文件）追加 -dirty 后缀。
 #   version.go 里 Version 默认为 "unknown"，仅供直接 go build 兜底，正式产物以 git tag 为准。
+#   CI 兜底：Jenkins 浅克隆/未 fetch tag 会让 git tag 缺失→unknown。可用 FM_VERSION 固定：
+#     FM_VERSION=0.1.3 ./build.sh -a all   （设了 FM_VERSION 就不再走 git describe，也不加 -dirty）
 #   例：HEAD 处于 tag v0.1.3 且工作区干净 → 版本号 0.1.3
 #     build/filemanageServer_linux_0.1.3
 #     build/filemanageServer_arm64_0.1.3
@@ -48,18 +52,20 @@ MODE="release"
 BUILD_IMAGE=0
 PULL_IMAGE=0
 FORCE_BUILD=0
+OPT_VERSION=""
 
 usage() {   # 打印文件头注释（第 2 行起连续 # 块）
     awk 'NR>1 && /^#/{sub(/^# ?/,""); print; next} NR>1{exit}' "$0"
     exit "${1:-0}"
 }
 
-while getopts ":a:d:infh" opt; do
+while getopts ":a:d:iV:fnh" opt; do
     case "$opt" in
         a) PLATFORMS="$OPTARG" ;;
         d) MODE="$OPTARG" ;;
         i) BUILD_IMAGE=1 ;;
         n) PULL_IMAGE=1 ;;
+        V) OPT_VERSION="$OPTARG" ;;
         f) FORCE_BUILD=1 ;;
         h) usage 0 ;;
         *) echo "未知参数 -$OPTARG（-h 查看用法）" >&2; usage 2 ;;
@@ -108,11 +114,19 @@ fi
 GIT_TAG="$(git describe --tags --always --dirty 2>/dev/null || echo unknown)"
 GIT_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo unknown)"
-VERSION="${VERSION#v}"
-[[ -n "$VERSION" ]] || VERSION="unknown"
-if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
-    VERSION="${VERSION}-dirty"
+# 产物版本号优先级：-V <值> > FM_VERSION 环境变量 > git describe（+ 脏树 -dirty）。
+# -V / FM_VERSION 视为显式指定（CI 干净检出用）：去 v 前缀、不加 -dirty。
+if [[ -n "${OPT_VERSION:-}" ]]; then
+    VERSION="${OPT_VERSION#v}"
+elif [[ -n "${FM_VERSION:-}" ]]; then
+    VERSION="${FM_VERSION#v}"
+else
+    VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo unknown)"
+    VERSION="${VERSION#v}"
+    [[ -n "$VERSION" ]] || VERSION="unknown"
+    if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+        VERSION="${VERSION}-dirty"
+    fi
 fi
 
 docker volume create "$VOL_GOPATH" >/dev/null
