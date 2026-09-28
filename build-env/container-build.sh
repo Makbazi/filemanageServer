@@ -5,11 +5,12 @@
 #
 # 用法: container-build.sh <targets> <debug|release>
 #   targets 逗号列表: linux | windows | arm64 （大小写不敏感）
-#   环境变量 GIT_TAG / GIT_COMMIT / BUILD_TIME 由宿主传入（版本信息注入，`-v` 可查）
+#   环境变量 GIT_TAG / GIT_COMMIT / BUILD_TIME 由宿主传入（版本信息注入，`-v` 可查）；
+#   BUILD_VERSION = 产物版本号（宿主从 git tag 推导，工作区有未提交改动带 -dirty 后缀）
 #
 # 产物命名规范: 工程名_平台_版本号[.exe] → /src/build/[debug/]
-#   filemanageServer_linux_0.1.1 / filemanageServer_arm64_0.1.1 /
-#   filemanageServer_windows_0.1.1.exe
+#   filemanageServer_linux_0.1.3 / filemanageServer_arm64_0.1.3 /
+#   filemanageServer_windows_0.1.3.exe   （版本号来自 BUILD_VERSION）
 # 一律 CGO_ENABLED=0 静态编译（sqlite 驱动为 glebarez 纯 Go 实现）。
 # =============================================================================
 set -euo pipefail
@@ -21,14 +22,16 @@ MODE="${2:?用法: container-build.sh <targets> <debug|release>}"
 cd /src
 VERSION_PKG="filemanageServer/internal/version"
 
-VERSION="$(sed -n 's/^const Version = "\([^"]*\)".*/\1/p' internal/version/version.go)"
-[[ -n "$VERSION" ]] || { echo "无法从 internal/version/version.go 解析版本号" >&2; exit 1; }
+# 版本号由宿主 build.sh 经 BUILD_VERSION 传入（取自最新 git tag）；未传时兜底读 version.go
+VERSION="${BUILD_VERSION:-}"
+[[ -n "$VERSION" ]] || VERSION="$(sed -n 's/^var Version = "\([^"]*\)".*/\1/p' internal/version/version.go)"
+[[ -n "$VERSION" ]] || { echo "无法确定版本号（BUILD_VERSION 未传且 version.go 解析失败）" >&2; exit 1; }
 
 GIT_TAG="${GIT_TAG:-unknown}"
 GIT_COMMIT="${GIT_COMMIT:-unknown}"
 BUILD_TIME="${BUILD_TIME:-unknown}"
 
-INJECT="-X ${VERSION_PKG}.GitTag=${GIT_TAG} -X ${VERSION_PKG}.GitCommit=${GIT_COMMIT} -X ${VERSION_PKG}.BuildTime=${BUILD_TIME}"
+INJECT="-X ${VERSION_PKG}.Version=${VERSION} -X ${VERSION_PKG}.GitTag=${GIT_TAG} -X ${VERSION_PKG}.GitCommit=${GIT_COMMIT} -X ${VERSION_PKG}.BuildTime=${BUILD_TIME}"
 if [[ "$MODE" == "release" ]]; then
     LDFLAGS="-s -w ${INJECT}"
     EXTRA=(-trimpath)
