@@ -143,6 +143,7 @@ func (s *Server) registerV1(e *gin.Engine) {
 	auth.POST("/auth/change-password", s.handleChangePassword)
 
 	auth.POST("/mkdir", s.handleMkdir)
+	auth.POST("/mkdirs", s.handleMkdirs) // 需求41：目录上传批量建目录（加性端点）
 	auth.POST("/rename", s.handleRename)
 	auth.POST("/move", s.handleMove)
 	auth.POST("/copy", s.handleCopy)

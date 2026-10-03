@@ -6,7 +6,7 @@ FileManage 体系的服务端（gin 提供 REST API，统一 `/api/v1`）：JWT+
 容器化部署。元数据存储内建于 `internal/store`（**sqlite3 / mysql / postgresql** 三驱动可选，
 可选 redis 缓存；未配置数据库时进入降级模式），0.3.0 起不再依赖独立工程 filemanageDb。
 
-当前版本：**0.1.0**（见 `internal/version/version.go` 与 `CHANGELOG.md`）
+当前版本：**0.2.0**（产物版本由 git tag 经 `-ldflags` 注入 `internal/version`，见 `CHANGELOG.md`）
 
 ## 快速开始（Get Start）
 
@@ -17,16 +17,16 @@ FileManage 体系的服务端（gin 提供 REST API，统一 `/api/v1`）：JWT+
 # （镜像缺失自动构建；命名规范与细节见 build-env/README.md）
 
 # 查看版本信息（版本号 / git tag / commit_id / 编译时间）
-./build/filemanageServer_linux_0.1.1 -v
+./build/filemanageServer_linux_0.2.0 -v
 
 # 首次运行自动生成示例配置 server.json
-./build/filemanageServer_linux_0.1.1 -config server.json
+./build/filemanageServer_linux_0.2.0 -config server.json
 # 编辑 server.json 的 roots（至少一个根目录）后重启
 ```
 
 **首次上手（约 3 分钟）：**
 
-1. 编译并运行：`./build.sh -a linux && ./build/filemanageServer_linux_0.1.1 -config server.json`
+1. 编译并运行：`./build.sh -a linux && ./build/filemanageServer_linux_0.2.0 -config server.json`
    —— 首启自动生成示例配置并在 `dataDir`（默认 `./data`）下生成**超级管理员账户文件**
    `admin-account.json`；
 2. 编辑 `server.json`：至少配置一个 `roots` 条目（托管目录），按需改 `listen`/
@@ -141,7 +141,7 @@ trashDir、uploadStagingDir、secretFile，以及 **`<dataDir>/Users`（0.7.0：
 |---|---|
 | 认证 | `auth/login` `auth/refresh` `auth/logout` `auth/me` `auth/change-password`（0.1.0 自助改密；`auth/register` 引导注册已移除） |
 | 浏览（可匿名，只读） | `roots` `files` `stat` `search`（名称/类型/大小/时间） |
-| 文件（需登录+ACL） | `mkdir` `rename` `move` `copy` `delete` |
+| 文件（需登录+ACL） | `mkdir` `mkdirs`（0.2.0 批量建目录，需求41 目录上传） `rename` `move` `copy` `delete` |
 | 传输 | `download` `preview`（Range+限速） `upload`（兼容） `upload/session` `upload/chunk` `upload/complete`（分片/断点续传/并发保护） |
 | 回收站 | `trash` `trash/restore` `trash/remove` `trash/clear`（30 天自动清理） |
 | 版本 | `versions` `versions/content` `versions/rollback` `versions/{id}` |

@@ -10,7 +10,8 @@
 
 | filemanageServer | 元数据存储 | 兼容 filemanageClient |
 |---|---|---|
-| 0.1.x（当前 **0.1.1**） | **自含**；0.1.1 新增内置 `file` 驱动（无库默认，全功能）+ 切换/导出/暂停管理面，SQL 表结构无变更 | **Client 0.1.0 完整功能（推荐）**；0.6.x/0.5.x 客户端功能完整（0.1.1 为服务端存储引擎与管理面增项，`/api/v1` 数据协议零变更；health 的 `db` 字段可为 `"file"`、暂停期返回 503——均为客户端既有容错路径，旧客户端无感）|
+| 0.2.x（当前 **0.2.0**） | 自含（同 0.1.x；0.2.0 纯 API 面增项 `POST /api/v1/mkdirs`，无新表/新列、schemaVersion 保持 8） | **Client 0.2.0 完整功能（推荐，目录上传）**；Client 0.1.x 及以下全功能无感（mkdirs 为加性端点，旧客户端不调用） |
+| 0.1.x | **自含**；0.1.1 新增内置 `file` 驱动（无库默认，全功能）+ 切换/导出/暂停管理面，SQL 表结构无变更 | **Client 0.1.0 完整功能**；0.6.x/0.5.x 客户端功能完整（0.1.1 为服务端存储引擎与管理面增项，`/api/v1` 数据协议零变更；health 的 `db` 字段可为 `"file"`、暂停期返回 503——均为客户端既有容错路径，旧客户端无感）；**Client 0.2.0 配本系列服务端时目录上传自动退化为逐个 `mkdir`（幂等递归，语义一致、仅往返更多）** |
 | 0.1.0 | 自含（表结构无变更；会话 user_id=0 超管哨兵） | 同上（0.1.1 无破坏性协议变更，0.1.0 客户端对 0.1.1 服务端全功能） |
 | ≤0.7.1 | 自含 | 见 git 历史（已按需求39清空） |
 
@@ -39,6 +40,26 @@
   版本号落到 `"unknown"`。设 `FM_VERSION=x.y.z ./build.sh -a all` 可跳过 git 推导固定版本
   （此时也不追加 `-dirty`）；亦可在流水线先 `git fetch --tags --force`（浅克隆加
   `--unshallow`）并 `git config --global --add safe.directory "$WORKSPACE"` 让 tag 真正可用。
+
+## [0.2.0] - 2026-10-03（目录上传服务端支持：`POST /api/v1/mkdirs`，本批用户清单第 1 条＝需求41）
+
+### 新增
+- **`POST /api/v1/mkdirs` 批量建目录（需求41）**：用户端口登录组（requireDB + authCtx +
+  requireLogin + maintenanceGate）加性端点，body `{rootId, paths:["a","a/b",...]}`
+  （1..1000 条，客户端按 ≤500/批发送，1MB JSON decode 上限内），需 Upload 权限。
+  **两阶段语义**：① 全量校验——`fileops.CleanRel` 归一去重（空 rel=根自身静默跳过）、
+  `permsBatch` 逐路径裁 Upload（ACL 只装载一次，同 handleList 模式）、`scope` 逐路径
+  jail/未知根/保留名 `.fmtrash` 校验——任一路径不过**整请求 4xx 且不创建任何东西**，
+  客户端可安全整体重试；② 创建——逐路径持 `transfer.Key` 锁 `os.MkdirAll(0755)` 后
+  即放（串行取锁避免死锁；幂等：已存在目录 no-op；中途 I/O 失败 fail-fast，已建保留、
+  重试幂等，语义同 handleMove 循环）。响应 `{ok:true,created:N}`。与 `mkdir` 一致：
+  不入 store、不存版本，目录元数据仍由 `handleList` 懒登记。
+- 其余 `/api/v1` 端点零变更；无新表/新列（Store 接口四方言不动）；schemaVersion 保持 8。
+
+### 兼容
+- **旧客户端零影响**（不调用即无感）：Client 0.1.x/0.6.x/0.5.x 配本版本全功能。
+- Client 0.2.0 的目录上传依赖本端点批量建目录骨架（含空目录）；配 Server <0.2.0 时
+  自动退化为逐个 `POST /mkdir`（幂等递归，落点语义一致），仍可用。
 
 ## [0.1.1] - 2026-09-23（文件元数据存储：无库不再缺功能，本批用户清单第 1 条＝需求40）
 
