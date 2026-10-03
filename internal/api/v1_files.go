@@ -200,6 +200,69 @@ func (s *Server) handleMkdir(c *gin.Context) {
 	writeJSON(c, http.StatusOK, map[string]any{"ok": true})
 }
 
+// maxMkdirPaths 单次 mkdirs 请求的路径上限；客户端按 ≤500/批发送，远在 decode
+// 的 1MB JSON 上限内，超限视为异常请求方。
+const maxMkdirPaths = 1000
+
+// handleMkdirs POST /api/v1/mkdirs（需求41：目录上传的服务端支持——批量预建目录树，
+// 加性端点，旧客户端不调用即无感）。
+// body {rootId, paths:["a","a/b",...]}，需 Upload 权限。两阶段：
+// ① 全量校验——CleanRel 归一去重（空 rel=根自身，幂等跳过）、permsBatch 逐路径裁
+//   Upload（同 handleList 模式，ACL 只装载一次）、scope 逐路径做 jail/未知根/保留名
+//   校验；任一失败整请求 4xx 且**不创建任何东西**，客户端可安全整体重试。
+// ② 创建——逐路径持 transfer.Key 锁 MkdirAll（串行取锁避免死锁；幂等：已存在目录
+//   为 no-op；中途 I/O 失败 fail-fast，已建目录保留，重试幂等，语义同 handleMove 循环）。
+// 与 handleMkdir 一致：不入 store、不存版本（目录元数据由 handleList 懒登记）。
+func (s *Server) handleMkdirs(c *gin.Context) {
+	var req pathReq
+	if err := decode(c, &req); err != nil || len(req.Paths) == 0 || len(req.Paths) > maxMkdirPaths {
+		writeErr(c, http.StatusBadRequest, errors.New("rootId + paths[1..1000] required"))
+		return
+	}
+	dec, err := s.permsBatch(c, req.RootID)
+	if err != nil {
+		writeErr(c, statusOf(err), err) // 未知根/不可达 → 按 statusOf 映射
+		return
+	}
+	type mkdirTarget struct {
+		rel string
+		sc  *scopeInfo
+	}
+	targets := make([]mkdirTarget, 0, len(req.Paths))
+	seen := make(map[string]bool, len(req.Paths))
+	for _, p := range req.Paths {
+		rel := fileops.CleanRel(p)
+		if rel == "" || seen[rel] {
+			continue
+		}
+		seen[rel] = true
+		if !dec(rel).Upload {
+			writeErr(c, http.StatusForbidden, fmt.Errorf("permission denied: upload on %q", rel))
+			return
+		}
+		sc, err := s.scope(c, req.RootID, rel)
+		if err != nil {
+			writeErr(c, statusOf(err), err) // jail 逃逸/保留名 .fmtrash → 403
+			return
+		}
+		targets = append(targets, mkdirTarget{rel, sc})
+	}
+	if len(targets) == 0 {
+		writeJSON(c, http.StatusOK, map[string]any{"ok": true, "created": 0})
+		return
+	}
+	for _, t := range targets {
+		unlock := s.Locks.Lock(transfer.Key(t.sc.PhysID, t.sc.Phys))
+		err := os.MkdirAll(t.sc.Abs, 0o755)
+		unlock()
+		if err != nil {
+			writeErr(c, statusOf(err), err)
+			return
+		}
+	}
+	writeJSON(c, http.StatusOK, map[string]any{"ok": true, "created": len(targets)})
+}
+
 // handleRename POST /api/v1/rename（需 Upload 权限）。
 func (s *Server) handleRename(c *gin.Context) {
 	var req pathReq
