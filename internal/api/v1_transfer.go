@@ -126,8 +126,18 @@ func (s *Server) handleUpload(c *gin.Context) {
 		writeErr(c, statusOf(err), err)
 		return
 	}
+	// 0.2.1：mtime 取真实 stat（与 handleList 同口径，content_hash 保留判据依赖
+	// 秒级 mtime 一致）；现算 SHA-256 入库，供 /check 重复上传校验比对。
 	e := FileEntry{Name: filepath.Base(sc.Abs), Path: sc.Disp, IsDir: false,
-		Size: n, Mtime: time.Now(), Kind: fileops.KindOf(sc.Disp, false)}
+		Size: n, Kind: fileops.KindOf(sc.Disp, false)}
+	if info, serr := os.Stat(sc.Abs); serr == nil {
+		e.Mtime = info.ModTime()
+	} else {
+		e.Mtime = time.Now()
+	}
+	if h, herr := fileops.SHA256File(sc.Abs); herr == nil {
+		e.Hash = h
+	}
 	s.recordMeta(u, sc, e)
 	writeJSON(c, http.StatusOK, e)
 }
@@ -295,8 +305,15 @@ func (s *Server) handleUploadComplete(c *gin.Context) {
 		writeErr(c, statusOf(err), err)
 		return
 	}
+	// 0.2.1：rename 后取真实 mtime（与 handleList/legacy upload 同口径），
+	// hash（合并期已现算）随 recordMeta 入 file_metas 供 /check 比对。
 	e := FileEntry{Name: filepath.Base(sc.Abs), Path: sc.Disp, IsDir: false,
-		Size: size, Mtime: time.Now(), Kind: fileops.KindOf(sc.Disp, false), Hash: hash}
+		Size: size, Kind: fileops.KindOf(sc.Disp, false), Hash: hash}
+	if info, serr := os.Stat(sc.Abs); serr == nil {
+		e.Mtime = info.ModTime()
+	} else {
+		e.Mtime = time.Now()
+	}
 	s.recordMeta(u, sc, e)
 	writeJSON(c, http.StatusOK, e)
 }

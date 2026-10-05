@@ -318,15 +318,20 @@ func warnShadowedAdmins(st store.Store, super *superadmin.Store) {
 }
 
 // sweepExecBits 需求37：启动后台清扫用户文件面（配置根 + 家目录）中常规文件
-// 的执行位。异步执行不拖慢开机；此后新落地的文件由 fileops 写路径即时剥离。
+// 的执行位 + 回收崩溃残留的写路径临时碎片（0.2.1：*.fmmerge-*/.fmtmp-* 超 24h）。
+// 异步执行不拖慢开机；此后新落地的文件由 fileops 写路径即时剥离。
 func sweepExecBits(cfg *config.Config) {
 	dirs := make([]string, 0, len(cfg.Roots)+1)
 	for i := range cfg.Roots {
 		dirs = append(dirs, cfg.Roots[i].Path)
 	}
 	dirs = append(dirs, cfg.UsersDir())
-	if n := fileops.SweepExec(dirs); n > 0 {
-		log.Printf("需求37: 已去除 %d 个用户文件的执行位（roots + Users 目录启动清扫）", n)
+	stripped, scratch := fileops.SweepExec(dirs)
+	if stripped > 0 {
+		log.Printf("需求37: 已去除 %d 个用户文件的执行位（roots + Users 目录启动清扫）", stripped)
+	}
+	if scratch > 0 {
+		log.Printf("启动清扫: 已回收 %d 个崩溃残留的上传/写入临时碎片（*.fmmerge-*/.fmtmp-*）", scratch)
 	}
 }
 

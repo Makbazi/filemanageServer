@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"time"
 
 	"filemanageServer/internal/fileops"
 	"filemanageServer/internal/perm"
@@ -140,7 +139,14 @@ func (s *Server) handleVersionRollback(c *gin.Context) {
 		return
 	}
 	e := sc.entry(sc.Abs, info)
-	e.Mtime = time.Now()
+	// 0.2.1：不再把 mtime 覆盖为 time.Now()——sc.entry 已是真实 stat，与
+	// handleList/上传口径一致（content_hash 保留判据依赖秒级 mtime 一致）；
+	// 回滚等于写入新字节，现算 SHA-256 入库供 /check 比对。
+	if !info.IsDir() {
+		if h, herr := fileops.SHA256File(sc.Abs); herr == nil {
+			e.Hash = h
+		}
+	}
 	s.recordMeta(u, sc, e)
 	s.audit(c, store.AuditRollback, "", 0, req.RootID, rel, fmt.Sprintf("rolled back to v%d", ver.VersionNo))
 	writeJSON(c, http.StatusOK, map[string]any{"ok": true, "restored": ver.VersionNo, "entry": e})

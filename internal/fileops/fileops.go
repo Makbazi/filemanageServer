@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CleanRel 把用户输入的相对路径规范为 root 内 slash 路径（""=根）。
@@ -155,12 +156,16 @@ func stripExec(p string) {
 	_ = os.Chmod(p, info.Mode().Perm()&^0o111)
 }
 
-// SweepExec 启动清扫（0.1.0 需求37）：递归遍历给定目录，为其中所有常规文件
-// 去除执行位（已是干净的文件经 DirEntry.Type 短路，零 syscall 开销之外的
-// 成本仅为 stat）。返回被修改的文件数；单个条目失败跳过并继续。
-// 由 main 在服务启动后异步执行一次（大树不拖慢开机）。
-func SweepExec(dirs []string) int {
-	stripped := 0
+// SweepExec 启动清扫（0.1.0 需求37 + 0.2.1 碎片兜底）：递归遍历给定目录，
+//  1. 为其中所有常规文件去除执行位；
+//  2. 删除崩溃残留的写路径临时碎片——`*.fmmerge-*`（上传合并临时，
+//     transfer/chunks.go）与 `*.fmtmp-*`（WriteFileAtomic 临时）命名的常规
+//     文件，仅当 mtime 超过 24h（进行中的合法操作不会老于此值，不误删）。
+//
+// 返回 (去位文件数, 清残片数)；单个条目失败跳过并继续。
+// 由 main 在服务启动后异步执行一次（大树不拖慢开机；写路径自身的失败分支
+// 已即时清理临时文件，这里只兜底"进程中途死掉"的残留）。
+func SweepExec(dirs []string) (stripped, scratch int) {
 	for _, d := range dirs {
 		_ = filepath.WalkDir(d, func(p string, ent fs.DirEntry, err error) error {
 			if err != nil {
@@ -169,8 +174,20 @@ func SweepExec(dirs []string) int {
 			if ent.IsDir() {
 				return nil
 			}
+			name := ent.Name()
 			info, ierr := ent.Info()
-			if ierr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			if ierr != nil || !info.Mode().IsRegular() {
+				return nil
+			}
+			if strings.Contains(name, ".fmmerge-") || strings.Contains(name, ".fmtmp-") {
+				if time.Since(info.ModTime()) > 24*time.Hour {
+					if rerr := os.Remove(p); rerr == nil {
+						scratch++
+					}
+				}
+				return nil
+			}
+			if info.Mode().Perm()&0o111 == 0 {
 				return nil
 			}
 			if cerr := os.Chmod(p, info.Mode().Perm()&^0o111); cerr == nil {
@@ -179,7 +196,7 @@ func SweepExec(dirs []string) int {
 			return nil
 		})
 	}
-	return stripped
+	return stripped, scratch
 }
 
 // CopyFile 复制单个文件。O_TRUNC 覆盖已有 dst 时复用其 inode 并保留旧 mode，

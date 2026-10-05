@@ -287,6 +287,9 @@ func sortEntries(entries []FileEntry) {
 
 // recordMeta 把文件元数据（归属、日期等）记入 Store，供 AI 描述关联。
 // 存储键统一用物理根 + 物理路径（0.5.0，见 scope.go）。
+// e.Hash 非空（上传/整传/回滚等真正写入字节的调用方现算）时携带 content_hash；
+// 为例行刷行（handleList）所留空时，Store 侧按 size/mtime 保留旧哈希（0.2.1），
+// 供 POST /check 重复上传校验做廉价比对。
 func (s *Server) recordMeta(u *store.User, sc *scopeInfo, e FileEntry) {
 	if u == nil {
 		return
@@ -294,6 +297,6 @@ func (s *Server) recordMeta(u *store.User, sc *scopeInfo, e FileEntry) {
 	_ = s.Store.PutFileMeta(&store.FileMeta{
 		UserID: u.ID, RootID: sc.PhysID, Path: sc.physOf(e.Path), Name: e.Name,
 		IsDir: e.IsDir, Size: e.Size, Mtime: e.Mtime, Kind: e.Kind,
-		UpdatedAt: time.Now(),
+		ContentHash: e.Hash, UpdatedAt: time.Now(),
 	})
 }
