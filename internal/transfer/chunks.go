@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -67,16 +68,24 @@ func (m *Manager) CreateOrResume(userID int64, rootID, relPath string, size, chu
 	if size < 0 {
 		return nil, false, errors.New("invalid size")
 	}
+	// chunkSize 先归一再比对：省略/越界的请求按默认片归一后再与会话比对，
+	// 避免"参数缺省"被误判成文件换版而误废会话。
+	if chunkSize < MinChunkSize || chunkSize > MaxChunkSize {
+		chunkSize = DefaultChunkSize
+	}
 	if existing, err := m.Store.GetActiveUploadSession(rootID, relPath); err == nil {
 		if existing.UserID != userID {
 			return nil, false, ErrConflict
 		}
-		return existing, true, nil
+		// 0.2.1：同用户命中旧会话但 size/chunkSize 与本次请求不符 = 文件已换成
+		// 另一版本，旧分片不可复用——此前原样返回旧会话会让客户端拿新片数填
+		// 旧会话（越界 400 / assemble size 不符，该路径永久卡死）。作废重建。
+		if existing.Size == size && existing.ChunkSize == chunkSize {
+			return existing, true, nil
+		}
+		_ = m.Abort(existing)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, false, err
-	}
-	if chunkSize < MinChunkSize || chunkSize > MaxChunkSize {
-		chunkSize = DefaultChunkSize
 	}
 	sess := &store.UploadSession{
 		ID:             fileops.RandomHex(12),
@@ -151,12 +160,28 @@ func (m *Manager) WriteChunk(sess *store.UploadSession, index int64, body io.Rea
 		_ = os.Remove(final)
 		return fmt.Errorf("%w: chunk %d exceeds max size", ErrBadSession, index)
 	}
-	if contains64(sess.UploadedChunks, index) {
+	// 标记入库用 per-session 锁包住"重读→append→回写"（0.2.1）：旧实现直接
+	// 在请求持有的 sess 副本上读-改-写整列覆盖，同会话并发传多片会互相丢标记
+	// （片在盘上但 complete 报缺片）。多实例共享库时竞态窗口仍在——标记丢失
+	// 最坏结果是多传一片（幂等覆盖），不损坏数据。
+	lockKey := Key("#sess", sess.ID)
+	unlock := m.Locks.Lock(lockKey)
+	defer unlock()
+	fresh, ferr := m.Store.GetUploadSession(sess.ID)
+	if ferr != nil {
+		return ferr
+	}
+	sess.UploadedChunks = fresh.UploadedChunks
+	if contains64(fresh.UploadedChunks, index) {
 		return nil // 重复上传同分片：幂等
 	}
-	sess.UploadedChunks = append(sess.UploadedChunks, index)
-	sort.Slice(sess.UploadedChunks, func(i, j int) bool { return sess.UploadedChunks[i] < sess.UploadedChunks[j] })
-	return m.Store.UpdateUploadSession(sess)
+	fresh.UploadedChunks = append(fresh.UploadedChunks, index)
+	sort.Slice(fresh.UploadedChunks, func(i, j int) bool { return fresh.UploadedChunks[i] < fresh.UploadedChunks[j] })
+	if err := m.Store.UpdateUploadSession(fresh); err != nil {
+		return err
+	}
+	sess.UploadedChunks = fresh.UploadedChunks
+	return nil
 }
 
 // Abort 终止会话：删除暂存与记录。
@@ -215,10 +240,17 @@ func (m *Manager) Complete(sess *store.UploadSession, destAbs string, beforeRepl
 		_ = os.Remove(tmp)
 		return "", 0, err
 	}
-	// 3) 标记完成并清理暂存（记录保留 24h 供查询，由 Cleaner 清理）
+	// 3) 标记完成并清理暂存（记录保留 24h 供查询，由 Cleaner 清理）。
+	// 0.2.1：文件已原子替换成功，标记/清账失败只告警不回错（客户端轮询会话
+	// 状态判完成的语义仍由 DB 状态决定，DB 写失败时状态滞留 uploading 会在
+	// 下次巡检或重试路径暴露，绝不能再改文件）。
 	sess.Status = store.UploadStatusCompleted
-	_ = m.Store.UpdateUploadSession(sess)
-	_ = os.RemoveAll(m.sessionDir(sess.ID))
+	if err := m.Store.UpdateUploadSession(sess); err != nil {
+		log.Printf("transfer: session %s complete mark failed (file already replaced): %v", sess.ID, err)
+	}
+	if err := os.RemoveAll(m.sessionDir(sess.ID)); err != nil {
+		log.Printf("transfer: staging cleanup for session %s: %v", sess.ID, err)
+	}
 	return hash, size, nil
 }
 

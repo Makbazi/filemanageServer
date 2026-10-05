@@ -134,6 +134,7 @@ func (s *Server) registerV1(e *gin.Engine) {
 	anon.POST("/search", s.handleSearch)
 	anon.GET("/download", s.handleDownload)
 	anon.GET("/preview", s.handlePreview)
+	anon.GET("/thumb", s.handleThumb) // 0.2.1 服务端缩略图（加性；守卫/匿名语义同 /preview）
 
 	// ---- 需登录（+元数据库）----
 	auth := v1.Group("", s.requireDB(), s.authCtx(), s.requireLogin())
@@ -144,6 +145,7 @@ func (s *Server) registerV1(e *gin.Engine) {
 
 	auth.POST("/mkdir", s.handleMkdir)
 	auth.POST("/mkdirs", s.handleMkdirs) // 需求41：目录上传批量建目录（加性端点）
+	auth.POST("/check", s.handleCheck)   // 0.2.1：目录重传批量校验（相同跳过/不同询问的预检）
 	auth.POST("/rename", s.handleRename)
 	auth.POST("/move", s.handleMove)
 	auth.POST("/copy", s.handleCopy)

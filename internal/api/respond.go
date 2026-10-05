@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"syscall"
 
 	"github.com/gin-gonic/gin"
 
@@ -27,12 +29,38 @@ func writeJSON(c *gin.Context, code int, v any) {
 	_ = json.NewEncoder(c.Writer).Encode(v)
 }
 
+// statusClientClosedRequest 非标准码 499（nginx 惯例）：客户端在请求完成前
+// 断开连接（上传大分片时被中间设备/对端 reset 是典型场景，0.2.1）。
+const statusClientClosedRequest = 499
+
+// isNetDisconnect 判定"客户端断开/连接被重置"类错误：这类错误不是服务端缺陷，
+// 不得按 internal error 记日志（0.2.1 修复上传断连刷 5xx 日志）。
+func isNetDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, http.ErrAbortHandler) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection aborted")
+}
+
 // writeErr 统一错误响应 {error: "..."}。
 // 5xx（503 降级模式 errNoDB 为契约信息除外）对外只输出通用文案，
 // 原始错误写服务端日志——防止数据库驱动内部错误串泄露主机/账号（0.3.1）。
+// 499（客户端断连，0.2.1）只记一行 info，绝不记 internal error。
 func writeErr(c *gin.Context, code int, err error) {
 	msg := err.Error()
-	if code >= http.StatusInternalServerError && code != http.StatusServiceUnavailable {
+	switch {
+	case code == statusClientClosedRequest:
+		log.Printf("client disconnected: %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
+		msg = "client closed request"
+	case code >= http.StatusInternalServerError && code != http.StatusServiceUnavailable:
 		log.Printf("internal error: %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
 		msg = "internal server error"
 	}
@@ -74,6 +102,8 @@ func statusOf(err error) int {
 		strings.Contains(err.Error(), "permitted"),
 		strings.Contains(err.Error(), "unknown root"):
 		return http.StatusForbidden
+	case isNetDisconnect(err):
+		return statusClientClosedRequest // 客户端断连（0.2.1）：非服务端缺陷
 	default:
 		return http.StatusInternalServerError
 	}
