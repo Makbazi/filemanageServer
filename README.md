@@ -140,7 +140,7 @@ trashDir、uploadStagingDir、secretFile，以及 **`<dataDir>/Users`（0.7.0：
 | 分组 | 端点 |
 |---|---|
 | 认证 | `auth/login` `auth/refresh` `auth/logout` `auth/me` `auth/change-password`（0.1.0 自助改密；`auth/register` 引导注册已移除） |
-| 浏览（可匿名，只读） | `roots` `files` `stat` `search`（名称/类型/大小/时间） `thumb`（0.2.1 服务端缩略图，守卫/匿名语义同 `preview`） |
+| 浏览（可匿名，只读） | `roots` `files` `stat` `search`（名称/类型/大小/时间） `thumb`（0.2.1 服务端缩略图，守卫/匿名语义同 `preview`；格式白名单 jpeg/png/gif/RAW，0.2.2 起补 bmp——常见 BI_RGB/BI_BITFIELDS/RLE 子集，纯标准库解码；其余格式 415 由客户端回退） |
 | 文件（需登录+ACL） | `mkdir` `mkdirs`（0.2.0 批量建目录，需求41 目录上传） `rename` `move` `copy` `delete` |
 | 传输 | `download` `preview`（Range+限速） `upload`（兼容） `upload/session` `upload/chunk` `upload/complete`（分片/断点续传/并发保护） `check`（0.2.1 目录重传批量校验 missing/same/differ/unknown） |
 | 回收站 | `trash` `trash/restore` `trash/remove` `trash/clear`（30 天自动清理） |

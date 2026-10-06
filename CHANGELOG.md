@@ -10,7 +10,8 @@
 
 | filemanageServer | 元数据存储 | 兼容 filemanageClient |
 |---|---|---|
-| 0.2.x（当前 **0.2.1**） | 自含（同 0.1.x；0.2.1 纯 API 面加性 `GET /thumb`+`POST /check` 与静默修复，无新表/新列、schemaVersion 保持 8） | **Client 0.3.2 完整功能（推荐：浏览零下载+目录重传预检依赖本版本端点）**；Client 0.2.0/0.3.x 早期版本全功能无感（不调用新端点即无感）；Client 0.1.x 及以下同 |
+| 0.2.x（当前 **0.2.2**） | 自含（同 0.1.x；0.2.2 仅 `GET /thumb` 白名单扩 BMP（thumbdec.go 纯标准库自实现），无新端点/新表/新列、schemaVersion 保持 8） | **Client 0.3.3 推荐基线（服务端网格 BMP 出图=本地缩放机制）**；Client 0.3.2/0.2.x 无感可用且 BMP 由 415 变 200 为纯增益面（旧客户端 size_hint 回退语义不变）；Client 0.1.x 及以下同 |
+| 0.2.1 | 自含（同 0.1.x；0.2.1 纯 API 面加性 `GET /thumb`+`POST /check` 与静默修复，无新表/新列、schemaVersion 保持 8） | **Client 0.3.2 完整功能（浏览零下载+目录重传预检依赖本版本端点）**；Client 0.2.0/0.3.x 早期版本全功能无感（不调用新端点即无感）；Client 0.1.x 及以下同 |
 | 0.2.0 | 自含（同 0.1.x；0.2.0 纯 API 面增项 `POST /api/v1/mkdirs`） | **Client 0.2.0 完整功能（目录上传）**；Client 0.1.x 及以下全功能无感（mkdirs 为加性端点，旧客户端不调用） |
 | 0.1.x | **自含**；0.1.1 新增内置 `file` 驱动（无库默认，全功能）+ 切换/导出/暂停管理面，SQL 表结构无变更 | **Client 0.1.0 完整功能**；0.6.x/0.5.x 客户端功能完整（0.1.1 为服务端存储引擎与管理面增项，`/api/v1` 数据协议零变更；health 的 `db` 字段可为 `"file"`、暂停期返回 503——均为客户端既有容错路径，旧客户端无感）；**Client 0.2.0 配本系列服务端时目录上传自动退化为逐个 `mkdir`（幂等递归，语义一致、仅往返更多）** |
 | 0.1.0 | 自含（表结构无变更；会话 user_id=0 超管哨兵） | 同上（0.1.1 无破坏性协议变更，0.1.0 客户端对 0.1.1 服务端全功能） |
@@ -41,6 +42,28 @@
   版本号落到 `"unknown"`。设 `FM_VERSION=x.y.z ./build.sh -a all` 可跳过 git 推导固定版本
   （此时也不追加 `-dirty`）；亦可在流水线先 `git fetch --tags --force`（浅克隆加
   `--unshallow`）并 `git config --global --add safe.directory "$WORKSPACE"` 让 tag 真正可用。
+
+## [0.2.2] - 2026-10-06（缩略图格式面扩展：GET /thumb 支持 BMP；本批用户清单第 2 条+第 5 条；tag 由维护者打）
+
+### 新增
+- **`GET /api/v1/thumb` 白名单补 BMP**（`v1_thumb.go` ext 白名单 + `thumbdec.go` 纯标准库
+  自实现 BMP 解码——Go 标准库 `image` 无 BMP，而客户端本地缩放（Rust image crate）支持
+  bmp/webp；对齐"服务端出图能力=本地目录机制"）：支持 BITMAPCOREHEADER(12)/
+  BITMAPINFOHEADER(40)/BITMAPV4HEADER(108)/BITMAPV5HEADER(124)；BI_RGB 1/4/8 位调色板
+  （3/4 字节表）+ 16/24/32 位真彩、BI_BITFIELDS 16/32 位（R/G/B 掩码按位提取、位宽精确
+  拉伸到 8 位）、BI_RLE8/BI_RLE4 游程（EOL/EOF/位移/字面 run 偶数对齐）；负高度=自上而下、
+  非 RLE 4 字节行对齐。JPEG/PNG 内嵌压缩、平面色等罕见变体→报错；所有切片读取前判长，
+  **畸形 BMP 绝不 panic**。`bmpDimensions` 先过 12MP/6000px 闸门再整体解码（与 std 路径
+  DecodeConfig 同构）；64MiB 输入上限、并发信号量、415 回退链一律不变。
+- **webp 明确不做**（有意决策，记录理由）：VP8 位流解码无法在"仅标准库+build-env 离线镜像
+  零新依赖+零测试面（需求29）"约束下安全自研——手搓解码器出图错误比 415 更糟。替代形态：
+  Client 0.3.3 对 ≤8MiB 走静默媒体缓存通道由本地 image 解码出图（与本地目录同形），
+  >8MiB 永久图标（不再重试、不出下载）。
+
+### 兼容
+- 无新端点、无 schema 变更（schemaVersion 保持 8）；对旧客户端 BMP 415→200 纯增益，其余
+  404/413/415/429 退化语义原样。**Server 0.2.2 为 Client 0.3.3 的推荐配套基线**
+  （0.3.3 自身为纯客户端行为批，协议零变更）。
 
 ## [0.2.1] - 2026-10-06（上传中断兜底 + 浏览零下载端点；本批用户清单第 1/2/3/5/6 条；tag 由维护者打）
 

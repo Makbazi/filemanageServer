@@ -25,6 +25,13 @@ import (
 // 内容与旧客户端本地缩放所见同源（jpeg/png/gif 直接解码；相机 RAW 取其内嵌
 // 最大完整 JPEG 预览，与客户端 thumb.rs 同一算法同扩展表）。
 //
+// 0.2.2：白名单补 **bmp**（thumbdec.go 纯标准库自实现常见子集 BI_RGB/
+// BI_BITFIELDS/RLE8/RLE4——对齐客户端本地缩放对 BMP 的出图能力；畸形 BMP
+// 同样 415 回退）。webp 的 VP8 位流无法在"仅标准库+离线构建+零测试面"约束
+// 下安全自研，维持 415——客户端 Client 0.3.3 对 ≤8MiB 走静默缓存通道由本地
+// image 解码出图（与本地目录同形），超限永久回退图标（不再报错重试，任何
+// 浏览操作都不再出现下载面）。
+//
 // 资源闸门：输入 ≤64MiB（413）；解码尺寸 ≤12MP 且单边 ≤6000px、白名单
 // 格式之外一律 415（客户端回退：≤8MiB 走旧整文件缓存通道交浏览器自绘，
 // 其余图标）；解码缩放全程受包级信号量限流（并发超限立即 429 不排队，
@@ -50,7 +57,7 @@ func (s *Server) handleThumb(c *gin.Context) {
 		return
 	}
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(abs), "."))
-	isStd := ext == "jpg" || ext == "jpeg" || ext == "png" || ext == "gif"
+	isStd := ext == "jpg" || ext == "jpeg" || ext == "png" || ext == "gif" || ext == "bmp"
 	isRAW := isRawExt(ext)
 	if !isStd && !isRAW {
 		writeErr(c, http.StatusUnsupportedMediaType, errors.New("thumbnail: format not supported"))
@@ -88,7 +95,7 @@ func (s *Server) handleThumb(c *gin.Context) {
 		}
 		data = jpegData
 	}
-	out, err := decodeScaleJPEG(data, maxSide)
+	out, err := decodeScaleJPEG(data, maxSide, ext)
 	if err != nil {
 		code := http.StatusUnsupportedMediaType
 		if !errors.Is(err, errThumbUnsupported) {
