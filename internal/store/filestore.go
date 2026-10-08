@@ -661,6 +661,9 @@ func (f *fileStore) SetMeta(key, value string) error {
 
 // ---------- file metas ----------
 
+// PutFileMeta upsert 元数据。content_hash 保留语义与 SQL 侧完全一致（0.2.1，
+// 见 sqlstore.go 同名方法注释）：incoming 哈希为空且旧行 size/mtime（秒）未变
+// → 保留旧 content_hash，例行刷行不得清空已存哈希。
 func (f *fileStore) PutFileMeta(m *FileMeta) error {
 	if m.UpdatedAt.IsZero() {
 		m.UpdatedAt = time.Now()
@@ -674,6 +677,10 @@ func (f *fileStore) PutFileMeta(m *FileMeta) error {
 	// upsert：唯一键命中 → 保留旧行 ID（SQL ON CONFLICT 语义，m.ID 不回填）
 	if e, ok := f.idx.fileMetasBy[metaKeyOf(r.UserID, r.RootID, r.Path)]; ok {
 		r.ID = e.ID
+		if r.ContentHash == "" && e.ContentHash != "" &&
+			e.Size == r.Size && e.Mtime.Unix() == r.Mtime.Unix() {
+			r.ContentHash = e.ContentHash
+		}
 	} else {
 		r.ID = f.allocID(tFileMetas)
 	}

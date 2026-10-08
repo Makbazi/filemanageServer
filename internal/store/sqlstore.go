@@ -283,13 +283,28 @@ func (s *sqlStore) SetMeta(key, value string) error {
 
 // ---------- file metas ----------
 
+// PutFileMeta upsert 元数据。content_hash 保留语义（0.2.1，四方言一致）：
+// 内容哈希只在"上传/回滚等真正产生新字节"的调用方携带；handleList 之类的
+// 例行刷行不得把已存哈希刷空——incoming hash=="" 且 size/mtime（秒精度）与
+// 旧行相同 → 保留旧 content_hash；否则以 incoming 覆盖（含清除）。
+// 读-改-写非原子：多实例并写同一行竞态存在，哈希仅作缓存性加速判据，
+// 竞态最坏结果是退化为 unknown（客户端复查），不影响正确性。
 func (s *sqlStore) PutFileMeta(m *FileMeta) error {
 	if m.UpdatedAt.IsZero() {
 		m.UpdatedAt = time.Now()
 	}
+	set := []string{"name", "is_dir", "size", "mtime", "kind", "content_hash", "updated_at"}
+	if m.ContentHash == "" {
+		var old fileMetaRow
+		err := s.db.Where("user_id = ? AND root_id = ? AND path = ?", m.UserID, m.RootID, m.Path).
+			Take(&old).Error
+		if err == nil && old.Size == m.Size &&
+			old.Mtime.Unix() == m.Mtime.Unix() && old.ContentHash != "" {
+			set = []string{"name", "is_dir", "size", "mtime", "kind", "updated_at"}
+		}
+	}
 	row := fileMetaRow{}.fromMeta(m)
-	err := s.db.Clauses(upsert([]string{"user_id", "root_id", "path"},
-		[]string{"name", "is_dir", "size", "mtime", "kind", "content_hash", "updated_at"})).
+	err := s.db.Clauses(upsert([]string{"user_id", "root_id", "path"}, set)).
 		Create(&row).Error
 	return mapErr(err)
 }

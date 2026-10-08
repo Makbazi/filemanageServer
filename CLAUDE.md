@@ -2,7 +2,9 @@
 
 > 本文件供 Claude Code 及开发者快速了解本工程。**自动更新约定（需求2）**：
 > 任何 API/配置/目录结构/行为变更，**必须在同一次改动中**同步更新本文件、
-> `README.md`（如涉及用法）、`CHANGELOG.md`（含兼容矩阵）与 `internal/version/version.go`。
+> `README.md`（如涉及用法）、`CHANGELOG.md`（含兼容矩阵）。自 0.1.1 起**产物版本号取
+> 最新 git tag**（build.sh 经 `-ldflags -X` 注入 `internal/version/version.go` 的 `Version`，
+> 其源码默认 `"unknown"`），打 tag 即定版，通常无需再手改 version.go 常量。
 
 ## 工程定位
 
@@ -16,34 +18,36 @@ FileManage 服务端（Go + **gin**，module `filemanageServer`）。元数据�
 | 路径 | 职责 |
 |---|---|
 | `cmd/filemanage-server/main.go` | 入口：`-mode worker|balancer`、配置加载、装配、TLS/清理器启动；**0.1.0：超管账户文件初始化（首启生成随机明文口令入日志）+ `adminPassword` 重置触发器 + 遗留同名库内管理员告警（warnShadowedAdmins）+ 执行位后台清扫（sweepExecBits→fileops.SweepExec）** |
-| `internal/store/` | 元数据抽象（0.3.0 并入，原 filemanageDb）：`Store` 接口 + 单一 `sqlStore` 实现（0.6.0 起查询/upsert/行映射一律 **gorm**，`rows.go` 行模型）+ `dialect_*.go` 方言层（仅剩幂等 DDL 清单/DSN 归一/LIKE 转义/pg 序列对齐）+ **0.7.0 `proxy.go`（可运行期原子换库的 Store 代理，全工程降级判定统一 `store.Degraded`）** 与 **`copy.go`（跨驱动全表迁移复制，keyset 分批保留主键）**；0.5.0 新增 `user_roots`（目录分配）/`server_meta`（迁移标记）、0.5.1 新增 `audit_events`（审计日志，保留 90 天）表——0.7.0/0.1.0 无新表/新列：0.1.0 超管会话复用 sessions 表 `user_id=0` 哨兵（`store.SuperAdminID`，无外键 + users 自增主键从 1 起天然不冲突）；超管账户本身在 `internal/superadmin` 文件、不入库。**0.1.1 `file` 驱动（需求40）**：`filelog.go`（帧 `op+len(LE32)+data+crc32c`，文件头 FMFS/v1/kind，MANIFEST 双代原子换，末段尾撕裂截断/中段 CRC 硬失败）+ `fileindex.go`（全内存 PK/唯一键二级索引，Put/Del 单一事实源）+ `filestore.go`（生命周期/写路径/用户等表；RWMutex 单写者，50ms 批量刷盘+关键操作 fsync+8MiB 段滚动）+ `filequery.go`（其余表，语义逐方法对齐 sqlstore）+ `filecomp.go`（快照压缩回收墓碑）+ `filecopy.go`（rowSource/rowSink 实现，file↔db 双向）+ `filelock_unix/other.go`（flock 单实例）；`DriverFile="file"`，""/none 归一为 file，DSN=目录（默认 `<dataDir>/filestore`） |
+| `internal/store/` | 元数据抽象（0.3.0 并入，原 filemanageDb）：`Store` 接口 + 单一 `sqlStore` 实现（0.6.0 起查询/upsert/行映射一律 **gorm**，`rows.go` 行模型）+ `dialect_*.go` 方言层（仅剩幂等 DDL 清单/DSN 归一/LIKE 转义/pg 序列对齐）+ **0.7.0 `proxy.go`（可运行期原子换库的 Store 代理，全工程降级判定统一 `store.Degraded`）** 与 **`copy.go`（跨驱动全表迁移复制，keyset 分批保留主键）**；0.5.0 新增 `user_roots`（目录分配）/`server_meta`（迁移标记）、0.5.1 新增 `audit_events`（审计日志，保留 90 天）表——0.7.0/0.1.0 无新表/新列：0.1.0 超管会话复用 sessions 表 `user_id=0` 哨兵（`store.SuperAdminID`，无外键 + users 自增主键从 1 起天然不冲突）；超管账户本身在 `internal/superadmin` 文件、不入库。**0.1.1 `file` 驱动（需求40）**：`filelog.go`（帧 `op+len(LE32)+data+crc32c`，文件头 FMFS/v1/kind，MANIFEST 双代原子换，末段尾撕裂截断/中段 CRC 硬失败）+ `fileindex.go`（全内存 PK/唯一键二级索引，Put/Del 单一事实源）+ `filestore.go`（生命周期/写路径/用户等表；RWMutex 单写者，50ms 批量刷盘+关键操作 fsync+8MiB 段滚动）+ `filequery.go`（其余表，语义逐方法对齐 sqlstore）+ `filecomp.go`（快照压缩回收墓碑）+ `filecopy.go`（rowSource/rowSink 实现，file↔db 双向）+ `filelock_unix/other.go`（flock 单实例）；`DriverFile="file"`，""/none 归一为 file，DSN=目录（默认 `<dataDir>/filestore`）；**0.2.1 `PutFileMeta` content_hash 空值保留语义（sqlstore+filestore 双实现、四方言一致）：incoming 哈希为空且旧行 size/mtime（秒）未变 → 保留旧 content_hash（handleList 例行刷行不再清空）；哈希由 recordMeta 在整传/分片 complete/回滚时写入** |
 | `internal/cache/` | 可选 redis 缓存：`Cache` 接口 + Noop/Redis 实现 + `decorator.go`（Store 装饰器，读穿透/写失效；0.7.0 装饰包在 Proxy 之上，透传 Degraded、提供 FlushAll）|
 | `internal/config/` | Config 类型 + 默认值 + 校验；`migrate.go` schemaVersion 迁移链 v1→…→v7（dataDir）→**v8（adminAccess 管理界面 IP 准入，需求38：local/lan/any/custom+IP/CIDR 列表，finalize 预解析网段、custom 非法值硬报错；存量 v7 配置补 `lan` 保持 0.7.x 语义，新装默认 `local`）**（改配置结构必须加迁移）；0.7.0 起 trashDir/staging/versions/secretFile/sqlite DSN 未显式配置时从 `dataDir` 派生；`AdminAccountFile()=<dataDir>/admin-account.json`、`AdminAllows(ip)`；`PersistDBEdit` 供管理台最小侵入回写 db 段（绝不整体序列化 Config——会泄 jwtSecret） |
-| `internal/api/` | `Server` 聚合结构 + **gin 双引擎路由**（`router.go`：`Handler()` 用户端口 / `AdminHandler()` 管理端口，registerV1 + registerAdminAPI + **registerAdminDBAPI（0.7.0 配库面）**）+ `scope.go`（0.5.0 jail 虚拟根唯一翻译层；0.7.0 集中拦截家目录保留名 `.fmtrash`）+ gin 中间件 + `v1_*.go` 各领域 handler；**0.1.0：`newEngine(netGuard,...)` 参数化网络准入（用户口 lanFilter / 管理口 adminIPFilter）；`Server.Super *superadmin.Store`；authCtx 先解析 claims 再分流（超管令牌零 Store 调用，降级可用）；`v1_super.go` 超管账户页（GET/PUT /admin/super + requireSuperAdmin 守卫）；`v1_auth.go` change-password + 超管登录优先 + 移除引导注册；`v1_dbconfig.go` 鉴权收敛为单一管理员登录态（删 firstBoot/dbUnlock 三态）；`/api/v1/admin` 拆 lite 组（info/super 组外 requireDB，其余仍 requireDB）；0.1.1：`manualPause/autoPause atomic.Bool` + `maintenanceGate()`（挂 v1 组/share 组/管理业务组，health/版本发现/配库面/超管页豁免）；`v1_dbconfig.go` 新增 `POST /admin/db/export`（纯导出 DB→文件存储不换引擎）与 `POST /admin/db/pause`（手动暂停开关），connect 支持 `driver=file`（含同目录拒切）、迁移全程 `withAutoPause` 屏障包裹** |
+| `internal/api/` | `Server` 聚合结构 + **gin 双引擎路由**（`router.go`：`Handler()` 用户端口 / `AdminHandler()` 管理端口，registerV1 + registerAdminAPI + **registerAdminDBAPI（0.7.0 配库面）**；**0.2.0 用户端口新增 `POST /api/v1/mkdirs` 批量建目录（需求41 目录上传，加性端点：{rootId,paths[1..1000]} 先全量校验（permsBatch Upload + scope jail）任一失败整请求 4xx 零创建，再逐路径持锁幂等 MkdirAll**）+ `scope.go`（0.5.0 jail 虚拟根唯一翻译层；0.7.0 集中拦截家目录保留名 `.fmtrash`）+ gin 中间件 + `v1_*.go` 各领域 handler；**0.1.0：`newEngine(netGuard,...)` 参数化网络准入（用户口 lanFilter / 管理口 adminIPFilter）；`Server.Super *superadmin.Store`；authCtx 先解析 claims 再分流（超管令牌零 Store 调用，降级可用）；`v1_super.go` 超管账户页（GET/PUT /admin/super + requireSuperAdmin 守卫）；`v1_auth.go` change-password + 超管登录优先 + 移除引导注册；`v1_dbconfig.go` 鉴权收敛为单一管理员登录态（删 firstBoot/dbUnlock 三态）；`/api/v1/admin` 拆 lite 组（info/super 组外 requireDB，其余仍 requireDB）；0.1.1：`manualPause/autoPause atomic.Bool` + `maintenanceGate()`（挂 v1 组/share 组/管理业务组，health/版本发现/配库面/超管页豁免）；`v1_dbconfig.go` 新增 `POST /admin/db/export`（纯导出 DB→文件存储不换引擎）与 `POST /admin/db/pause`（手动暂停开关），connect 支持 `driver=file`（含同目录拒切）、迁移全程 `withAutoPause` 屏障包裹**；**0.2.1：`v1_thumb.go`+`thumbdec.go` 新增 `GET /api/v1/thumb?rootId&path&w=`（anon 组、守卫逐行同 handlePreview——degradedView(Download)+resolve，匿名语义与 /preview 完全一致；服务端生成 ≤512px JPEG，标准库解码+12MP/6000px/64MiB 闸门+包级信号量限流，RAW 内嵌 JPEG 段链扫描移植自客户端 thumb.rs，扩展名表三处同抄；404/413/415/429 供客户端退化链。**0.2.2：白名单补 BMP（thumbdec.go 纯标准库自实现解码：CORE/INFO/V4/V5 头 × BI_RGB 1/4/8/16/24/32bpp 调色板与真彩、BI_BITFIELDS R/G/B 掩码位宽拉伸、BI_RLE8/RLE4、负高度自上而下、非 RLE 4 字节行对齐；读取前判长绝不 panic；bmpDimensions 先过尺寸闸门；畸形→415 走既有回退链）——使服务端网格出图能力与客户端本地缩放机制对齐；webp 维持 415（VP8 不可标准库自研，Client 0.3.3 ≤8MiB 静默缓存本地解码出图）**）；`v1_check.go` 新增 `POST /api/v1/check {rootId,files:[{path,size,hash?}]}`（auth 组，permsBatch Upload+scope 全量校验整请求 4xx 语义同 mkdirs；state=missing|differ|same|unknown——file_metas.content_hash+秒级 mtime 新鲜性判据，目录重传预检支撑）；`recordMeta` 携带 FileEntry.Hash 入 content_hash；`respond.go` `isNetDisconnect`→499+info 日志（断连不记 internal error）；mtime 口径统一真实 stat（整传/complete/回滚三处，v1_versions 删 time.Now() 覆盖行）** |
 | `internal/auth/` | JWT access / refresh 哈希 / 分享令牌 / 随机密码；**0.1.0：`Claims`+`ParseAccessClaims`（替代 ParseAccess）、`IssueSuperAccess`（sub=0 + super + gen 凭据纪元）；删 Issue/ParseDBUnlockToken（三态解锁移除）** |
 | `internal/perm/` | ACL 权限引擎：admin 全权；命中 ACL 层就近裁决（同层 OR）；匿名强制不可下载/上传/删除且默认只读；无库降级分支=仅浏览（0.5.0 D1） |
-| `internal/transfer/` | 分片上传 Manager、per-path 锁注册表、令牌桶限速 |
-| `internal/fileops/` | 路径安全（SafeRel/JoinRoot）、copy/move、SHA256、版本库 VersionStore、后台 Cleaner；**0.7.0 `homes.go`：用户名目录名校验 / 家目录与 `.fmtrash` 路径 / EnsureHomeFor（建号即建目录+追加 `_users` 分配）/ EnsureUserHomes（启动幂等补齐，标记 `userhomes.v7`）**；**0.1.0 需求37：`stripExec`（MovePath 两分支 + CopyFile 收尾，仅常规文件 `perm&^0o111`）/ `SweepExec(dirs)`（启动后台清扫 roots+Users 存量文件执行位）** |
+| `internal/transfer/` | 分片上传 Manager、per-path 锁注册表、令牌桶限速；**0.2.1**：CreateOrResume 同用户命中旧会话但 size/chunkSize 不符→作废重建（chunkSize 先归一再比对）、WriteChunk 标记段 per-session 锁（`Key("#sess",id)`）重读-合并-回写（修并发丢标记）、Complete 成功后 DB/清账失败记日志不再静默 |
+| `internal/fileops/` | 路径安全（SafeRel/JoinRoot）、copy/move、SHA256、版本库 VersionStore、后台 Cleaner；**0.7.0 `homes.go`：用户名目录名校验 / 家目录与 `.fmtrash` 路径 / EnsureHomeFor（建号即建目录+追加 `_users` 分配）/ EnsureUserHomes（启动幂等补齐，标记 `userhomes.v7`）**；**0.1.0 需求37：`stripExec`（MovePath 两分支 + CopyFile 收尾，仅常规文件 `perm&^0o111`）/ `SweepExec(dirs)`（启动后台清扫 roots+Users 存量文件执行位）**；**0.2.1：`SweepExec` 同一次遍历顺带回收崩溃残留写路径碎片（`*.fmmerge-*`/`*.fmtmp-*` 常规文件且 mtime>24h，返回 (去位数, 清残数)）；Cleaner uploading 僵尸判据 CreatedAt→UpdatedAt（慢速续传不连坐；completed/aborted 留 24h、孤儿 staging mtime>24h 不变）** |
 | `internal/superadmin/` | **0.1.0 需求32/33/34/36 新包**：文件承载超管（`<dataDir>/admin-account.json` 0600，不进数据库，无库降级/热切换后同样可用）；明文↔bcrypt 密文状态机（首次成功登录转密文，需求34）、`generation` 凭据纪元（外部编辑文件即视为重置→纪元+1 回写吊销旧令牌）、`EnsureCreated/Match/Verify/SetCredentials/Plaintext/Generation`；其他管理员 = 数据库 users 表 role=admin（需求35），由超管经管理台创建 |
 | `internal/ai/` | AIProvider 接口 + openai/ollama/none |
 | `internal/adminui/` | go:embed `web/`（纯手写 HTML/JS/CSS，无构建链）挂 `/admin/`（**仅管理端口**，0.5.0 含目录分配编辑器与物理根浏览器；0.7.0 "数据库"页：状态/选型/测连/热切换/迁移；**0.1.0：登录页降级提示改"以超管账户登录"（删解锁卡/引导注册卡/setup-entry/`refreshTabAccess` 按超管身份+降级态收敛页签）；新"超级管理员"页（账户名/新口令、明文有效期徽章、PUT 后换用重发令牌）；用户页管理员行编辑/删除与 role=admin 选项仅超管可用；概览加 adminAccess/超管账户名卡；0.1.1："数据库"页驱动列表含 file（无库默认，dsn 可留空=派生目录、输入框不禁用），新增"导出到文件存储（不切换）"按钮（复用 DSN 目录字段+覆盖勾选，409 自动勾覆盖）、"暂停/恢复客户端操作"按钮（状态卡新增"客户端操作"徽章 = paused）、`/status` 的 `paused` 字段驱动渲染）**） |
 | `internal/balancer/` | 轮询反向代理 + 健康检查（`-mode balancer`） |
 | `internal/tlsx/` | 自签证书生成 |
-| `internal/version/` | `Version` 常量与 `APIVersions`；0.7.1 增 `GitTag/GitCommit/BuildTime`（build.sh 经 `-ldflags -X` 注入，`-v` 输出） |
+| `internal/version/` | `Version`（`var`，源码默认 `"unknown"`，build.sh 经 `-ldflags -X` 注入 git tag 版本号）与 `APIVersions`；0.7.1 增 `GitTag/GitCommit/BuildTime`（同经 `-ldflags -X` 注入，`-v` 输出） |
 | `deploy/` | Docker×3 / entrypoint / compose / nginx 样例（**运行**镜像） |
-| `build-env/` | **编译**环境（Dockerfile.rockylinux9 + container-build.sh + README；产物规范 linux/windows(.exe)/arm64 静态编译，经 `./build.sh -a -d` 调用） |
+| `build-env/` | **编译**环境（Dockerfile.rockylinux9 + container-build.sh + README；产物规范 linux/windows(.exe)/arm64 静态编译，经 `./build.sh -a -d` 编译 / `-i` 构建镜像 / `-n` 拉取镜像调用；版本号由 git tag 推导，工作区脏带 `-dirty`） |
 
 ## 运行
 
 ```bash
-./build.sh -a all -d release    # Docker 编译环境（build-env/Dockerfile.rockylinux9，镜像
-                                # filemanage-server-build:rockylinux9，缺失自动构建）多平台静态编译：
-                                # build/filemanageServer_linux_0.1.1 / _arm64_0.1.1 / _windows_0.1.1.exe
-                                # -a 取 linux|windows|arm64|all；-d debug → build/debug/
+./build.sh -i                   # 构建编译环境镜像（docker build，不编译工程）
+./build.sh -n                   # 拉取编译环境镜像（docker pull，不编译工程）
+./build.sh -a all -d release    # Docker 编译环境（build-env/Dockerfile.rockylinux9）多平台静态编译：
+                                # 版本号取最新 git tag（去 v；工作区脏带 -dirty），非 version.go 常量
+                                # build/filemanageServer_linux_0.2.2 / _arm64_0.2.2 / _windows_0.2.2.exe
+                                # -a 取 linux|windows|arm64|all；-d debug → build/debug/；-f 强制重建镜像
                                 # （release: -trimpath -s -w；debug: -N -l；均 CGO_ENABLED=0 静态、均注入版本信息）
-./build/filemanageServer_linux_0.1.1 -v                            # 打印 版本号/tag/commit_id/编译时间 后退出
-./build/filemanageServer_linux_0.1.1 -config server.json           # worker（用户端口 + 管理端口双 listener）
-./build/filemanageServer_linux_0.1.1 -mode balancer -config balancer.json
+./build/filemanageServer_linux_0.2.2 -v                            # 打印 版本号/tag/commit_id/编译时间 后退出
+./build/filemanageServer_linux_0.2.2 -config server.json           # worker（用户端口 + 管理端口双 listener）
+./build/filemanageServer_linux_0.2.2 -mode balancer -config balancer.json
 ```
 
 首次运行生成示例配置；`/api` 版本发现；`/api/v1/health` 健康检查（0.1.1 起无库默认 `db:"file"`——文件存储引擎；仅异常路径可能 `db:"none"`）。
@@ -99,7 +103,10 @@ FileManage 服务端（Go + **gin**，module `filemanageServer`）。元数据�
    见 filequery.go 各方法头注释），且 sqlite 不得改动已发布列/表（磁盘兼容既有 .db
    文件，见 dialect_sqlite.go 头注释）。**file 驱动无新表/新列**，仅新增驱动实现。
    0.1.1 无配置结构变更，schemaVersion 保持 8（需求25 不触发；driver 默认值改为
-   "file" 属语义变更非结构变更）。
+   "file" 属语义变更非结构变更）。**0.2.1：`PutFileMeta` 的 content_hash 空值保留语义
+   （incoming 空+size/mtime 秒级未变→留旧哈希）必须在 sqlStore 与 fileStore 双侧同实现；
+   读-改-写非原子（多实例并写竞态最坏退化 unknown，方法注释已声明）——任何新调用方
+   刷行前须确认此语义不被绕过。**
 5. **API 版本**：新端点加进 `registerV1`（gin 分组）；破坏性变更须新开 `registerV2` 并更新
    `version.APIVersions`，旧版本保留（需求17）。对外信封 `{"error":msg}` 与状态码
    是客户端契约，不得随框架变化。
@@ -107,7 +114,10 @@ FileManage 服务端（Go + **gin**，module `filemanageServer`）。元数据�
 7. **多实例**：新增落盘状态必须放在可共享目录（trashDir/uploadStagingDir/versions.dir/
    secretFile）或入库，避免实例间不可见（需求26/27）。
 8. **错误映射**：内部错误经 `statusOf()` 映射 HTTP 码；transfer 包的哨兵错误
-   （ErrConflict→409 等）已接入。
+   （ErrConflict→409 等）已接入。**0.2.1：客户端断连/连接重置类错误（`isNetDisconnect`：
+   context.Canceled/http.ErrAbortHandler/ECONNRESET/EPIPE/io.ErrUnexpectedEOF 及文案兜底）归
+   499 非标准码，`writeErr` 只记一行 info——上传大分片被中间设备 reset 属网络常态，
+   不得刷 internal error 日志；499 永不进入成功路径语义。**
 9. 编译验证：`go build ./... && go vet ./...`（不写测试，需求29）。
 10. **不做 git 提交/分支/tag**（需求30），版本 tag 由维护者操作；发版时手动同步
     `internal/version/version.go` 与 CHANGELOG。
@@ -156,7 +166,7 @@ FileManage 服务端（Go + **gin**，module `filemanageServer`）。元数据�
 
 ## 当前版本
 
-`internal/version.Version = "0.1.1"`（需求40：无数据库默认改用内置**文件存储驱动**
+`internal/version.Version`（源码默认 `"unknown"`，build 时经 `-ldflags -X` 注入 git tag 版本号；本基线对应 0.2.2）——**0.2.2（用户 2026-10 第二批清单，缩略图格式面扩展）**：`GET /api/v1/thumb` 白名单补 **BMP**——thumbdec.go 纯标准库自实现解码（CORE/INFO/V4/V5 头 × BI_RGB 1/4/8/16/24/32bpp、BI_BITFIELDS 16/32 位掩码、BI_RLE8/RLE4、自上而下/行对齐；全部读取前判长、畸形 BMP 不 panic；先过 12MP/6000px 尺寸闸门再解码；64MiB/并发/415 回退链同旧），对齐客户端本地缩放（image crate 支持 bmp）的出图能力（需求：服务端缩略图与本地目录机制一致）。webp 有意不做并记录理由：VP8 位流无法在「标准库 only+离线构建镜像零新依赖+零测试面（需求29）」约束下安全自研，手搓解码器出图错误比 415 更糟——替代形态为 Client 0.3.3 静默缓存通道本地解码出图（≤8MiB）/图标（超限）。无新端点/新表/新列、schemaVersion 保持 8；对旧客户端 BMP 415→200 纯增益、其余语义无感。**承前 0.2.1（用户 2026-10 清单：上传中断兜底+浏览零下载端点）**：加性 `GET /api/v1/thumb`（anon 组、守卫同 /preview 匿名语义不变；标准库 ≤512px JPEG 生成，RAW 内嵌预览段链扫描，尺寸/大小/并发三重闸门）与 `POST /api/v1/check`（auth 组，目录重传 missing/same/differ/unknown 批量校验）；file_metas.content_hash 开始真实落库（recordMeta 携带+PutFileMeta 空值保留语义+整传/complete/回滚 mtime 口径统一真实 stat）；断连错误归 499（respond.isNetDisconnect；日志降级 info）；CreateOrResume 版本不符作废重建、WriteChunk per-session 标记锁、Complete DB 失败不再静默、Cleaner 僵尸判据 UpdatedAt、SweepExec 同遍历回收 .fmmerge/.fmtmp 崩溃碎片；无新表/新列、schemaVersion 保持 8、旧客户端无感零变化（不调新端点即无感；GET/DELETE upload/session 早已存在，0.2.1 仅行为修复）。**承前 0.2.0——需求41**：用户端口新增加性端点 `POST /api/v1/mkdirs` 批量建目录（目录上传服务端支持：先全量校验 Upload 权限 + scope jail/保留名 `.fmtrash`——任一失败整请求 4xx 且不创建任何东西，再逐路径持 `transfer.Key` 锁幂等 `MkdirAll`；不入 store/不存版本，与 mkdir 同语义；旧客户端不调用即无感，Client 0.2.0 配旧服务端目录上传自动退化逐个 mkdir）。**承前 0.1.1——需求40**：无数据库默认改用内置**文件存储驱动**
 `file`——`internal/store/file*.go`：二进制帧 op+length+data+crc32c（CRC Castagnoli）
 追加日志 + 全内存 PK/唯一键二级索引 + 快照压缩 + MANIFEST 双代原子换 + 末段尾撕裂
 截断容忍/中段 CRC 硬失败 + 50ms 批量刷盘（账户/会话/SetMeta 等关键操作同步 fsync）+

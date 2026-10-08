@@ -10,7 +10,10 @@
 
 | filemanageServer | 元数据存储 | 兼容 filemanageClient |
 |---|---|---|
-| 0.1.x（当前 **0.1.1**） | **自含**；0.1.1 新增内置 `file` 驱动（无库默认，全功能）+ 切换/导出/暂停管理面，SQL 表结构无变更 | **Client 0.1.0 完整功能（推荐）**；0.6.x/0.5.x 客户端功能完整（0.1.1 为服务端存储引擎与管理面增项，`/api/v1` 数据协议零变更；health 的 `db` 字段可为 `"file"`、暂停期返回 503——均为客户端既有容错路径，旧客户端无感）|
+| 0.2.x（当前 **0.2.2**） | 自含（同 0.1.x；0.2.2 仅 `GET /thumb` 白名单扩 BMP（thumbdec.go 纯标准库自实现），无新端点/新表/新列、schemaVersion 保持 8） | **Client 0.3.3 推荐基线（服务端网格 BMP 出图=本地缩放机制）**；Client 0.3.2/0.2.x 无感可用且 BMP 由 415 变 200 为纯增益面（旧客户端 size_hint 回退语义不变）；Client 0.1.x 及以下同 |
+| 0.2.1 | 自含（同 0.1.x；0.2.1 纯 API 面加性 `GET /thumb`+`POST /check` 与静默修复，无新表/新列、schemaVersion 保持 8） | **Client 0.3.2 完整功能（浏览零下载+目录重传预检依赖本版本端点）**；Client 0.2.0/0.3.x 早期版本全功能无感（不调用新端点即无感）；Client 0.1.x 及以下同 |
+| 0.2.0 | 自含（同 0.1.x；0.2.0 纯 API 面增项 `POST /api/v1/mkdirs`） | **Client 0.2.0 完整功能（目录上传）**；Client 0.1.x 及以下全功能无感（mkdirs 为加性端点，旧客户端不调用） |
+| 0.1.x | **自含**；0.1.1 新增内置 `file` 驱动（无库默认，全功能）+ 切换/导出/暂停管理面，SQL 表结构无变更 | **Client 0.1.0 完整功能**；0.6.x/0.5.x 客户端功能完整（0.1.1 为服务端存储引擎与管理面增项，`/api/v1` 数据协议零变更；health 的 `db` 字段可为 `"file"`、暂停期返回 503——均为客户端既有容错路径，旧客户端无感）；**Client 0.2.0 配本系列服务端时目录上传自动退化为逐个 `mkdir`（幂等递归，语义一致、仅往返更多）** |
 | 0.1.0 | 自含（表结构无变更；会话 user_id=0 超管哨兵） | 同上（0.1.1 无破坏性协议变更，0.1.0 客户端对 0.1.1 服务端全功能） |
 | ≤0.7.1 | 自含 | 见 git 历史（已按需求39清空） |
 
@@ -24,6 +27,112 @@
   输出 `build/`（debug → `build/debug/`）；三目标均 CGO_ENABLED=0 静态编译
   （glebarez 纯 Go sqlite），版本信息注入（`-v` 可查）与旧脚本一致。
 - 旧接口 `./build.sh [-r]`（宿主直编）移除；等价 `./build.sh -a linux -d release`。
+
+### 构建体系（2026-09-28，无版本号变更/无协议影响）
+- `build.sh` 新增镜像管理参数（与工程编译解耦）：`-i` **构建编译镜像**（docker build）、
+  `-n` **拉取编译镜像**（docker pull）——任一给定即只操作镜像、完成后退出，不编译工程；
+  `-f` 编译时强制重建镜像（本地缺镜像时仍自动构建）。
+- **产物版本号改由 git tag 推导**，不再取 `internal/version/version.go` 常量：
+  取最新可达 git tag（去 `v` 前缀，`git describe --tags --abbrev=0`），工作区有未提交
+  改动（跟踪文件，`git status --porcelain --untracked-files=no`）追加 `-dirty` 后缀，
+  经 `BUILD_VERSION` 传入容器并 `-ldflags -X` 注入 `version.Version`。
+  `version.Version` 由 `const` 改为 `var`、默认 `"unknown"`（`-X` 只能注入变量；直接
+  `go build` 未注入时保持 unknown，health/admin/`-v` 读取路径不变、无协议影响）。
+- CI 兜底 `FM_VERSION`：Jenkins 浅克隆/未 fetch tag 会使 `git describe --tags` 失败→
+  版本号落到 `"unknown"`。设 `FM_VERSION=x.y.z ./build.sh -a all` 可跳过 git 推导固定版本
+  （此时也不追加 `-dirty`）；亦可在流水线先 `git fetch --tags --force`（浅克隆加
+  `--unshallow`）并 `git config --global --add safe.directory "$WORKSPACE"` 让 tag 真正可用。
+
+## [0.2.2] - 2026-10-06（缩略图格式面扩展：GET /thumb 支持 BMP；本批用户清单第 2 条+第 5 条；tag 由维护者打）
+
+### 新增
+- **`GET /api/v1/thumb` 白名单补 BMP**（`v1_thumb.go` ext 白名单 + `thumbdec.go` 纯标准库
+  自实现 BMP 解码——Go 标准库 `image` 无 BMP，而客户端本地缩放（Rust image crate）支持
+  bmp/webp；对齐"服务端出图能力=本地目录机制"）：支持 BITMAPCOREHEADER(12)/
+  BITMAPINFOHEADER(40)/BITMAPV4HEADER(108)/BITMAPV5HEADER(124)；BI_RGB 1/4/8 位调色板
+  （3/4 字节表）+ 16/24/32 位真彩、BI_BITFIELDS 16/32 位（R/G/B 掩码按位提取、位宽精确
+  拉伸到 8 位）、BI_RLE8/BI_RLE4 游程（EOL/EOF/位移/字面 run 偶数对齐）；负高度=自上而下、
+  非 RLE 4 字节行对齐。JPEG/PNG 内嵌压缩、平面色等罕见变体→报错；所有切片读取前判长，
+  **畸形 BMP 绝不 panic**。`bmpDimensions` 先过 12MP/6000px 闸门再整体解码（与 std 路径
+  DecodeConfig 同构）；64MiB 输入上限、并发信号量、415 回退链一律不变。
+- **webp 明确不做**（有意决策，记录理由）：VP8 位流解码无法在"仅标准库+build-env 离线镜像
+  零新依赖+零测试面（需求29）"约束下安全自研——手搓解码器出图错误比 415 更糟。替代形态：
+  Client 0.3.3 对 ≤8MiB 走静默媒体缓存通道由本地 image 解码出图（与本地目录同形），
+  >8MiB 永久图标（不再重试、不出下载）。
+
+### 兼容
+- 无新端点、无 schema 变更（schemaVersion 保持 8）；对旧客户端 BMP 415→200 纯增益，其余
+  404/413/415/429 退化语义原样。**Server 0.2.2 为 Client 0.3.3 的推荐配套基线**
+  （0.3.3 自身为纯客户端行为批，协议零变更）。
+
+## [0.2.1] - 2026-10-06（上传中断兜底 + 浏览零下载端点；本批用户清单第 1/2/3/5/6 条；tag 由维护者打）
+
+### 新增
+- **`GET /api/v1/thumb?rootId=&path=&w=` 服务端缩略图（新文件 `v1_thumb.go`+`thumbdec.go`）**：
+  注册于 anon 组紧随 /preview，守卫逐行照抄 handlePreview（`degradedView(..., d.Download, "download(thumb)")`
+  +`s.resolve()`）——匿名语义与 /preview 完全一致（有库匿名 401，需求6 无新增面）。返回 ≤w px 长边
+  jpeg q80（w clamp 64-1024 默认 512）；jpeg/png/gif 标准库解码（`DecodeConfig` 闸门：>12MP 或单边
+  >6000px→415），相机 RAW 整读 ≤64MiB 提取**最大完整内嵌 JPEG**（Go 移植客户端 thumb.rs 的
+  SOI/段链/EOI 扫描算法，扩展名表三处同抄）；>64MiB→413、非白名单/无预览→415（客户端回退链由
+  Client 0.3.2 实现：≤8MiB 走旧整文件缓存通道，其余图标）。包级信号量限并发
+  （cap=min(4,max(2,numCPU/2))，取不到槽 429 不排队）。**只用 Go 标准库**（不引入 x/image——
+  编译镜像 GOMODCACHE 无其 zip，离线构建有风险；缩放为迭代 2× 盒式减半+末次面积加权）。
+  用途：客户端网格浏览不再把整文件拉进本地缓存（需求"打开服务端文件/文件夹不要触发下载"）。
+- **`POST /api/v1/check {rootId, files:[{path,size,hash?}]}` 批量重复校验（新文件 `v1_check.go`，
+  auth 组）**：目录重传预检端点（Client 0.3.2 相同跳过/不同询问流程的服务端支撑）。≤1000 条/请求
+  （客户端 500/批），逐路径 permsBatch Upload + scope jail 全量校验（任一不过整请求 4xx 零判定，
+  同 mkdirs 骨架可安全整体重试）。逐条判定 state：live stat 失败→`missing`；size 不符或远端为目录
+  →`differ`；请求未带 hash 或 `file_metas` 无存哈希→`unknown`；存哈希≠请求哈希→`differ`；
+  哈希相等但 meta.size/mtime（秒）与磁盘现状不符→`unknown`（meta 过期，防绕库直改磁盘误判）；
+  全等→`same`。
+- **file_metas.content_hash 真实落库（让 /check 廉价可用的前置修复）**：
+  `recordMeta` 携带 `FileEntry.Hash` 入库（旧实现恒填空串——`/check` 将永远拿不到证据）；
+  `PutFileMeta` upsert **空值保留语义**（四方言一致，sqlstore/filestore 双侧实现）：incoming 哈希为
+  空且旧行 size/mtime（秒）未变 → 保留旧 content_hash（handleList 例行刷行不再清空已存哈希）；
+  mtime 口径三处统一为真实 stat：整文件上传（写后 stat+SHA256File 补哈希）、分片 complete
+  （rename 后 stat）、回滚（**删除 `v1_versions.go` 的 `e.Mtime=time.Now()` 覆盖行**+现算哈希）——
+  秒级 mtime 一致是保留判据成立的前提。
+
+### 修复
+- **客户端断连不再记 internal error**：`respond.go` 新增 `isNetDisconnect`
+  （context.Canceled/http.ErrAbortHandler/ECONNRESET/EPIPE/io.ErrUnexpectedEOF/文案兜底）→
+  `statusOf` 归 **499**（nginx 惯例非标准码），`writeErr` 对 499 只记一行 info——上传大分片
+  被中间设备 reset 时服务端日志不再刷 5xx（本批事故日志根因之一）；响应体对已断开的客户端无意义。
+- **上传会话与碎片兜底**：`CreateOrResume` 同用户命中旧会话但 size/chunkSize 与本次请求不符
+  →作废重建（旧行为原样返回旧参数会话，客户端拿新片数填旧会话即永久卡死；chunkSize 先归一
+  再比对，省略该字段的老请求不被误判换版）；`WriteChunk` 标记段按会话锁
+  （`Key("#sess",id)`）重读-合并-回写，修同会话并发传片互相丢标记；`Complete` 成功后被忽略的
+  DB 状态/清账错误改为记日志（不再静默"文件已替换、会话假死 uploading"）。
+- **Cleaner 僵尸会话判据 `CreatedAt+7d` → `UpdatedAt+7d`**（每片写入即刷新，已核验
+  UpdateUploadSession）——跨越 7 天的慢速续传不再被连坐清除。
+- **崩溃残留碎片清扫**：`SweepExec` 启动遍历（roots+Users）同时回收 `*.fmmerge-*`/`*.fmtmp-*`
+  命名的常规文件（mtime>24h 才删，绝不误杀在途合并/写入），返回 (去位数, 清残数) 双计数。
+
+### 兼容
+- **全加性**：旧客户端（含 0.1.x/0.2.x/0.3.x 早期）不调用 thumb/check 即无感；499/会话重建/
+  标记锁对旧客户端是行为改善而非契约变化。`/api/v1` 既有端点请求/响应形态零变更。
+- 无新表/新列（file_metas 既有 content_hash 列开始被写入）；Store 接口签名不变（仅
+  PutFileMeta 语义注释补充）；schemaVersion 保持 8（无配置结构变更，需求25 不触发）。
+- 多实例注意：file_metas 保留语义为读-改-写非原子（竞态最坏退化 unknown，注释声明）；
+  目标目录碎片清扫依赖各实例启动遍历。
+
+### 新增
+- **`POST /api/v1/mkdirs` 批量建目录（需求41）**：用户端口登录组（requireDB + authCtx +
+  requireLogin + maintenanceGate）加性端点，body `{rootId, paths:["a","a/b",...]}`
+  （1..1000 条，客户端按 ≤500/批发送，1MB JSON decode 上限内），需 Upload 权限。
+  **两阶段语义**：① 全量校验——`fileops.CleanRel` 归一去重（空 rel=根自身静默跳过）、
+  `permsBatch` 逐路径裁 Upload（ACL 只装载一次，同 handleList 模式）、`scope` 逐路径
+  jail/未知根/保留名 `.fmtrash` 校验——任一路径不过**整请求 4xx 且不创建任何东西**，
+  客户端可安全整体重试；② 创建——逐路径持 `transfer.Key` 锁 `os.MkdirAll(0755)` 后
+  即放（串行取锁避免死锁；幂等：已存在目录 no-op；中途 I/O 失败 fail-fast，已建保留、
+  重试幂等，语义同 handleMove 循环）。响应 `{ok:true,created:N}`。与 `mkdir` 一致：
+  不入 store、不存版本，目录元数据仍由 `handleList` 懒登记。
+- 其余 `/api/v1` 端点零变更；无新表/新列（Store 接口四方言不动）；schemaVersion 保持 8。
+
+### 兼容
+- **旧客户端零影响**（不调用即无感）：Client 0.1.x/0.6.x/0.5.x 配本版本全功能。
+- Client 0.2.0 的目录上传依赖本端点批量建目录骨架（含空目录）；配 Server <0.2.0 时
+  自动退化为逐个 `POST /mkdir`（幂等递归，落点语义一致），仍可用。
 
 ## [0.1.1] - 2026-09-23（文件元数据存储：无库不再缺功能，本批用户清单第 1 条＝需求40）
 

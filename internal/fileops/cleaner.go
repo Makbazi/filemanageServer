@@ -113,7 +113,10 @@ func (c *Cleaner) cleanUploadSessions() (int, error) {
 		expired := false
 		switch s.Status {
 		case store.UploadStatusUploading:
-			expired = now.Sub(s.CreatedAt) > 7*24*time.Hour
+			// 0.2.1：僵尸判定改按最后活动时间（UpdatedAt，每片写入即刷新）——
+			// 旧口径按 CreatedAt+7d 会把跨越 7 天的合法慢续传连坐清除。
+			// 7d 无任何活动 = 确属废弃会话（其 staging 碎片一并回收）。
+			expired = now.Sub(s.UpdatedAt) > 7*24*time.Hour
 		default:
 			expired = now.Sub(s.UpdatedAt) > 24*time.Hour
 		}
