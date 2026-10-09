@@ -1,4 +1,4 @@
-// v1_dbconfig.go：管理台数据库配置面（0.7.0）——驱动选型、状态查看、测试连接、
+// v1_dbconfig.go：管理台数据库配置面——驱动选型、状态查看、测试连接、
 // 连接/切换（含可选数据迁移）、导出、维护暂停，全部仅存在于 adminListen。
 //
 // 与 /api/v1/admin/*（整组挂 requireDB）不同，本组注册在 requireDB 与
@@ -13,6 +13,7 @@
 //   - export：纯导出——当前库全表复制到文件存储目录，**不换引擎、不写配置**；
 //     全程同屏障；目标非空 409（force 清空重建）。
 //   - pause：手动"中断按钮"——维护暂停开关（/status 的 paused 字段驱动 UI 按钮态）。
+//
 // 旧 connect 的 driver=none"断开回降级模式"臂已废除：""/none 归一为 file（文件存储）。
 package api
 
@@ -27,7 +28,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"filemanageServer/internal/auth"
 	"filemanageServer/internal/config"
 	"filemanageServer/internal/fileops"
 	store "filemanageServer/internal/store"
@@ -81,22 +81,21 @@ func (s *Server) dbStatusAuthed(c *gin.Context) bool {
 	if !ok {
 		return false
 	}
-	cl, err := auth.ParseAccessClaims(s.Cfg.JWTSecret, ts)
-	if err != nil {
+	e, err := s.Auth.Lookup(c.Request.Context(), ts)
+	if err != nil || e.Kind != store.AuthKindUser {
 		return false
 	}
-	if cl.Super {
+	if e.Super {
 		if s.Super == nil {
 			return false
 		}
 		gen, gerr := s.Super.Generation()
-		return gerr == nil && gen == cl.Gen
+		return gerr == nil && gen == e.Gen
 	}
 	if !s.dbReady() {
 		return false
 	}
-	u, err := s.Store.GetUserByID(cl.UID)
-	return err == nil && u != nil && u.Role == store.RoleAdmin
+	return e.Role == store.RoleAdmin
 }
 
 func cutBearer(h string) (string, bool) {
@@ -117,7 +116,7 @@ func (s *Server) handleAdminDBStatus(c *gin.Context) {
 		"configured":    s.dbReady(),
 		"dataDir":       s.Cfg.DataDir,
 		"usersDir":      s.Cfg.UsersDir(),
-		// 0.1.0 需求32/33：降级模式登录台改用超管文件账户（0.7.x 的
+		// 0.1.0 需求32/33：降级模式登录台改用超管文件账户（此前的
 		// firstBoot/needsUnlock 键已移除），登录页据此展示超管引导文案。
 		"superAdmin": s.superAdminName(),
 	}

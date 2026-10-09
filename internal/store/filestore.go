@@ -466,7 +466,7 @@ func (f *fileStore) DeleteUser(id int64) error {
 	if f.closed {
 		return closedErr()
 	}
-	var metaIDs, descIDs, trashIDs, sessIDs, rootIDs, aclIDs []int64
+	var metaIDs, descIDs, trashIDs, sessIDs, rootIDs, aclIDs, authIDs []int64
 	var uploadIDs []string
 	for _, r := range f.idx.fileMetas {
 		if r.UserID == id {
@@ -503,6 +503,11 @@ func (f *fileStore) DeleteUser(id int64) error {
 			aclIDs = append(aclIDs, r.ID)
 		}
 	}
+	for _, r := range f.idx.authSessions {
+		if r.UserID == id {
+			authIDs = append(authIDs, r.ID)
+		}
+	}
 	for _, x := range metaIDs {
 		if err := f.delLocked(tFileMetas, x); err != nil {
 			return err
@@ -520,6 +525,11 @@ func (f *fileStore) DeleteUser(id int64) error {
 	}
 	for _, x := range sessIDs {
 		if err := f.delLocked(tSessions, x); err != nil {
+			return err
+		}
+	}
+	for _, x := range authIDs {
+		if err := f.delLocked(tAuthSessions, x); err != nil {
 			return err
 		}
 	}

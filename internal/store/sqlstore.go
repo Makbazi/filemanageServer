@@ -1,9 +1,9 @@
 // sqlstore.go：Store 接口的唯一 SQL 实现（sqlite3/mysql/postgresql 共用）。
-// 0.6.0（需求2）：数据操作一律经 gorm 框架（行对象映射见 rows.go）；
+// 需求2：数据操作一律经 gorm 框架（行对象映射见 rows.go）；
 // 建表/迁移仍走 dialect_*.go 的幂等 DDL（需求25：sqlite 既有 .db 文件字节兼容，
 // 只增不改，不使用 gorm AutoMigrate）。upsert 经 clause.OnConflict 由 gorm 按
-// 方言渲染（sqlite/pg ON CONFLICT、mysql ON DUPLICATE KEY UPDATE），语义与
-// 0.5.x 的 upsertSuffix 一致。唯一约束冲突经 TranslateError/文本兜底统一映射为
+// 方言渲染（sqlite/pg ON CONFLICT、mysql ON DUPLICATE KEY UPDATE），各方言语义
+// 一致。唯一约束冲突经 TranslateError/文本兜底统一映射为
 // ErrExists，记录不存在统一 ErrNotFound。
 package store
 
@@ -60,7 +60,7 @@ func newSQLStore(driver, dsn string) (Store, error) {
 
 func (s *sqlStore) Driver() string { return s.d.name }
 
-// Ping 连通性探测（0.7.0 管理台数据库状态卡；实现 store.pinger）。
+// Ping 连通性探测（管理台数据库状态卡；实现 store.pinger）。
 func (s *sqlStore) Ping() error {
 	raw, err := s.db.DB()
 	if err != nil {
@@ -90,7 +90,7 @@ func (s *sqlStore) Migrate() error {
 // ---------- 错误/结果映射 ----------
 
 // mapErr 把 gorm 哨兵错误翻译为 Store 契约错误；唯一键冲突额外做文本兜底
-// （TranslateError 未覆盖的驱动路径保持与 0.5.x 相同的 ErrExists 语义）。
+// （TranslateError 未覆盖的驱动路径也保持统一的 ErrExists 语义）。
 func mapErr(err error) error {
 	switch {
 	case err == nil:
@@ -118,7 +118,7 @@ func isUniqueText(err error) bool {
 		strings.Contains(msg, "duplicate key value")
 }
 
-// affectedG 更新/删除零行 → ErrNotFound（与 0.5.x affected() 同语义）。
+// affectedG 更新/删除零行 → ErrNotFound（零行即视为记录不存在）。
 func affectedG(res *gorm.DB) error {
 	if res.Error != nil {
 		return mapErr(res.Error)
@@ -194,10 +194,11 @@ func (s *sqlStore) UpdateUserRole(id int64, role string) error {
 	return affectedG(s.db.Model(&userRow{}).Where("id = ?", id).Update("role", role))
 }
 
-// DeleteUser 级联清理用户的全部关联数据（单事务，与 0.5.x 相同的删除顺序）。
+// DeleteUser 级联清理用户的全部关联数据（单事务，按固定顺序级联删除）。
 func (s *sqlStore) DeleteUser(id int64) error {
 	return mapErr(s.db.Transaction(func(tx *gorm.DB) error {
-		byUser := []any{&fileMetaRow{}, &aiDescRow{}, &trashRow{}, &sessionRow{}, &uploadRow{}, &userRootRow{}}
+		byUser := []any{&fileMetaRow{}, &aiDescRow{}, &trashRow{}, &sessionRow{}, &uploadRow{}, &userRootRow{},
+			&authSessionRow{}} // 0.2.3：认证图随删号级联（share 行 user_id=-1 天然不命中）
 		for _, m := range byUser {
 			if err := tx.Where("user_id = ?", id).Delete(m).Error; err != nil {
 				return err
@@ -216,7 +217,7 @@ func (s *sqlStore) CountUsers() (int64, error) {
 	return n, mapErr(err)
 }
 
-// ---------- user roots（0.5.0 jail 模型） ----------
+// ---------- user roots（jail 模型） ----------
 
 func (s *sqlStore) ListUserRoots(userID int64) ([]*UserRoot, error) {
 	var rows []userRootRow
@@ -598,7 +599,7 @@ func aclList(rows []aclRow) []*FolderACL {
 	return out
 }
 
-// ListPublicViewACLs public 主体且 view=1 的条目（公开共享目录清单，0.5.0）。
+// ListPublicViewACLs public 主体且 view=1 的条目（公开共享目录清单）。
 func (s *sqlStore) ListPublicViewACLs() ([]*FolderACL, error) {
 	var rows []aclRow
 	err := s.db.Where("subject_type = ? AND can_view = 1", SubjectPublic).
@@ -770,6 +771,70 @@ func (s *sqlStore) DeleteExpiredSessions(now time.Time) error {
 	return mapErr(s.db.Where("expires_at < ?", now).Delete(&sessionRow{}).Error)
 }
 
+// ---------- 认证会话（0.2.3 三层认证图持久层） ----------
+
+func (s *sqlStore) CreateAuthSession(a *AuthSession) error {
+	now := time.Now()
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = now
+	}
+	if a.LastUsedAt.IsZero() {
+		a.LastUsedAt = now
+	}
+	row := authSessionRow{}.fromAuthSession(a)
+	row.ID = 0
+	if err := s.db.Create(&row).Error; err != nil {
+		return mapErr(err)
+	}
+	a.ID = row.ID
+	return nil
+}
+
+func (s *sqlStore) GetAuthSessionByTokenHash(tokenHash string) (*AuthSession, error) {
+	var r authSessionRow
+	if err := s.db.Where("token_hash = ?", tokenHash).Take(&r).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	return r.to(), nil
+}
+
+// RenewAuthSession 按主键续期；RowsAffected=0 → ErrNotFound（行已被撤权/清扫——
+// 认证中心据此摘除上层缓存，绝不续住已吊销条目）。map 式 Updates（零值列不被跳过）。
+func (s *sqlStore) RenewAuthSession(id int64, expiresAt, lastUsedAt time.Time) error {
+	return affectedG(s.db.Model(&authSessionRow{}).Where("id = ?", id).
+		Updates(map[string]any{"expires_at": expiresAt, "last_used_at": lastUsedAt}))
+}
+
+func (s *sqlStore) DeleteAuthSessionByTokenHash(tokenHash string) error {
+	return mapErr(s.db.Where("token_hash = ?", tokenHash).Delete(&authSessionRow{}).Error)
+}
+
+func (s *sqlStore) DeleteAuthSessionsByUser(userID int64) error {
+	return mapErr(s.db.Where("user_id = ?", userID).Delete(&authSessionRow{}).Error)
+}
+
+func (s *sqlStore) DeleteExpiredAuthSessions(now time.Time) error {
+	return mapErr(s.db.Where("expires_at < ?", now).Delete(&authSessionRow{}).Error)
+}
+
+// ListActiveAuthSessions 未过期条目（token_hash 升序窗口，供认证中心重启预热；
+// 窗口按哈希稳定采样，冷凭证仍经读路径惰性恢复；上限由调用方传入）。
+func (s *sqlStore) ListActiveAuthSessions(limit int) ([]*AuthSession, error) {
+	var rows []authSessionRow
+	q := s.db.Where("expires_at >= ?", time.Now()).Order("token_hash")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&rows).Error; err != nil {
+		return nil, mapErr(err)
+	}
+	out := make([]*AuthSession, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].to())
+	}
+	return out, nil
+}
+
 // ---------- 分片上传会话 ----------
 
 func (s *sqlStore) CreateUploadSession(u *UploadSession) error {
@@ -839,7 +904,7 @@ func (s *sqlStore) DeleteUploadSessionsBefore(before time.Time) error {
 		Delete(&uploadRow{}).Error)
 }
 
-// ---------- 审计日志（0.5.1） ----------
+// ---------- 审计日志 ----------
 
 func (s *sqlStore) AddAuditEvent(e *AuditEvent) error {
 	if e.CreatedAt.IsZero() {
@@ -947,6 +1012,8 @@ func (s *sqlStore) copyScan(table string, fn func(batch any) error) error {
 		return sqlScanStr(s, "mkey", func(r *metaKVRow) string { return r.Mkey }, func(b []metaKVRow) error { return emit(b) })
 	case "audit_events":
 		return sqlScanInt(s, func(r *auditRow) int64 { return r.ID }, func(b []auditRow) error { return emit(b) })
+	case "auth_sessions":
+		return sqlScanInt(s, func(r *authSessionRow) int64 { return r.ID }, func(b []authSessionRow) error { return emit(b) })
 	}
 	return fmt.Errorf("copy: unknown table %q", table)
 }
@@ -979,6 +1046,8 @@ func (s *sqlStore) copyWrite(table string, batch any) error {
 	case []metaKVRow:
 		err = s.db.CreateInBatches(b, 500).Error
 	case []auditRow:
+		err = s.db.CreateInBatches(b, 500).Error
+	case []authSessionRow:
 		err = s.db.CreateInBatches(b, 500).Error
 	default:
 		return fmt.Errorf("copy: batch type mismatch for table %q", table)

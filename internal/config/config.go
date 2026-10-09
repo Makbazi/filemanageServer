@@ -40,12 +40,31 @@ type TLSCfg struct {
 	AutoSelfSign bool   `json:"autoSelfSign"`
 }
 
-// SessionCfg 会话策略（需求22）。AccessTTL 为短期访问令牌有效期；
-// IdleDays 为 refresh 会话最长闲置天数（默认 21 天 = 3 周），
-// 活跃使用自动轮换续期，超过 IdleDays 未使用必须重新登录。
+// SessionCfg 会话策略（需求22，0.2.3 起语义微调——不再有 JWT 访问令牌）：
+// AccessTTL = 管理台会话（超管/DB 管理员）绝对有效期（默认 1h，不滑动——
+// 保持"控制台每小时重登"节奏）；IdleDays = 客户端用户会话的滑动闲置窗口
+// （默认 21 天 = 3 周，每次认证请求自动续期，超过未使用必须重新登录）。
 type SessionCfg struct {
 	AccessTTL string `json:"accessTTL"`
 	IdleDays  int    `json:"idleDays"`
+}
+
+// AuthCfg 三层认证图容量与节奏（0.2.3，替代 JWT 方案；见 internal/auth/center.go）：
+//   - MemMaxEntries 进程内 LRU 条目上限（默认 200000；超限按 LRU 驱逐）；
+//   - MemTTL 进程内条目新鲜期（默认 "5m"；超龄回源 redis/持久层——多实例
+//     撤权可见延迟的上界，单实例 flock 部署无此问题）；
+//   - RedisMaxEntries redis 认证缓存条目上限（默认 5000000，按 lastUsed 近似
+//     LRU 裁剪；仅 cache.enabled 时生效，条目 TTL=剩余有效期自然回收）；
+//   - SweepInterval 清扫周期（默认 "10m"：过期回收三层 + 脏续期批量写回 +
+//     撤权重试 + L2 索引修剪）；
+//   - TouchWriteEvery 单条目滑动续期最小写回间隔（默认 "10m"；硬杀进程至多丢
+//     该窗口内的续期进度 = 凭证提前到期，安全方向）。
+type AuthCfg struct {
+	MemMaxEntries   int    `json:"memMaxEntries"`
+	MemTTL          string `json:"memTTL"`
+	RedisMaxEntries int64  `json:"redisMaxEntries"`
+	SweepInterval   string `json:"sweepInterval"`
+	TouchWriteEvery string `json:"touchWriteEvery"`
 }
 
 // AnonymousCfg 匿名访问策略（需求6）。Enabled=true 时未登录客户端可
@@ -57,7 +76,7 @@ type AnonymousCfg struct {
 // AdminAccessCfg 管理界面 IP 准入策略（0.1.0 需求38），仅作用于管理端口
 // （adminListen 引擎，含 /admin/ 静态台与全部 admin/配库 API）：
 //   - local  只允许本机回环地址（新装默认）
-//   - lan    允许局域网（回环 + RFC1918/ULA/link-local，= 0.7.x lanOnly 语义；
+//   - lan    允许局域网（回环 + RFC1918/ULA/link-local，= lanOnly 语义；
 //     migrate7to8 给存量配置补的本值，升级不改变可达面）
 //   - any    允许任何来源 IP（远程暴露时务必配合强口令与 TLS）
 //   - custom 只允许 IPs 列出的精确 IP 或 CIDR 网段
@@ -69,7 +88,7 @@ type AdminAccessCfg struct {
 }
 
 // RateLimitCfg 传输限速（需求18），单位 KB/s，0 表示不限速（默认）。
-// QPS 为每 IP 每秒请求数上限（0.5.1 安全迭代，0=关闭）。
+// QPS 为每 IP 每秒请求数上限（安全迭代，0=关闭）。
 type RateLimitCfg struct {
 	UploadKBps   int `json:"uploadKBps"`
 	DownloadKBps int `json:"downloadKBps"`
@@ -89,7 +108,7 @@ type BalancerCfg struct {
 	Workers []string `json:"workers"`
 }
 
-// DBCfg 元数据库配置（0.3.0）。Driver 取值：
+// DBCfg 元数据库配置。Driver 取值：
 // "file"（含别名 ""/"none"，0.1.1 起为默认：未配置数据库时使用内置文件存储，
 // DSN=存储目录，留空派生 <dataDir>/filestore，全功能可用、仅单实例）|
 // sqlite3 | mysql | postgresql（含 sqlite/postgres/pg/mariadb 别名，见 store.Open）。
@@ -99,7 +118,7 @@ type DBCfg struct {
 	DSN    string `json:"dsn"` // file=存储目录 / sqlite3 文件路径 / mysql 与 postgres DSN
 }
 
-// CacheCfg 可选 redis 缓存（0.3.0，非必须）。Enabled=false（默认）时不启用，
+// CacheCfg 可选 redis 缓存（非必须）。Enabled=false（默认）时不启用，
 // 全部元数据读写直达数据库。
 type CacheCfg struct {
 	Enabled bool     `json:"enabled"`
@@ -116,17 +135,17 @@ type RedisCfg struct {
 	ACLTTLSeconds  int    `json:"aclTTLSeconds"`  // 默认 60
 }
 
-// Config 服务端配置（schemaVersion=8）。
+// Config 服务端配置（schemaVersion=9）。
 type Config struct {
 	SchemaVersion int `json:"schemaVersion"`
 
-	// DataDir 服务端运行数据根目录（0.7.0）：未显式配置的 trashDir/
+	// DataDir 服务端运行数据根目录：未显式配置的 trashDir/
 	// uploadStagingDir/secretFile/versions.dir/sqlite 默认 DSN 均由其派生；
 	// 用户主目录固定位于 <dataDir>/Users/<用户名>（建用户自动分配，需求3）。
 	DataDir string `json:"dataDir"`
 
 	Listen      string `json:"listen"`      // 默认 0.0.0.0:8484（用户/客户端端口，不含任何管理路由）
-	AdminListen string `json:"adminListen"` // 管理面独立端口（0.5.0）：/admin/ 界面与全部 admin API 仅此端口可达；默认 bind 127.0.0.1（服务端本机）
+	AdminListen string `json:"adminListen"` // 管理面独立端口：/admin/ 界面与全部 admin API 仅此端口可达；默认 bind 127.0.0.1（服务端本机）
 	LANOnly     bool   `json:"lanOnly"`     // 默认 true：只接受局域网客户端
 
 	// AdminAccess 管理界面 IP 准入策略（0.1.0 需求38）：local/lan/any/custom，
@@ -137,26 +156,30 @@ type Config struct {
 	// 不来自 JSON）。运行期只读。
 	adminNets []*net.IPNet
 
-	// CORSAllowOrigins 显式跨域来源白名单（0.5.1，可选）。空（默认）= 不下发任何
-	// CORS 头（浏览器跨域读取天然被拒，与 0.3.x 行为一致）；支持条目 "*"。
+	// CORSAllowOrigins 显式跨域来源白名单（可选）。空（默认）= 不下发任何
+	// CORS 头（浏览器跨域读取天然被拒，与旧行为一致）；支持条目 "*"。
 	CORSAllowOrigins []string `json:"corsAllowOrigins"`
-	JWTSecret        string   `json:"jwtSecret"`  // 显式密钥；为空时使用 SecretFile（多实例共享）
-	SecretFile       string   `json:"secretFile"` // JWT 密钥持久化文件，默认 ./data/jwt.secret
-	InstanceID       string   `json:"instanceId"` // 多实例部署标识（需求26），默认取主机名
+	// JWTSecret/SecretFile 已弃用（0.2.3 认证中心取代 JWT，认证不再读取二者）。
+	// 字段与 jwt.secret 物化行为刻意保留：存量配置文件原样可加载、PersistDBEdit
+	// "绝不整体序列化 Config"的防泄密纪律保真；新部署可自行删除这两项。
+	JWTSecret  string `json:"jwtSecret"`
+	SecretFile string `json:"secretFile"`
+	InstanceID string `json:"instanceId"` // 多实例部署标识（需求26），默认取主机名
 
 	DB    DBCfg    `json:"db"`
-	Cache CacheCfg `json:"cache"` // 可选 redis 缓存（0.3.0）
+	Cache CacheCfg `json:"cache"` // 可选 redis 缓存
 
 	Roots              []RootCfg `json:"roots"`
 	TrashDir           string    `json:"trashDir"`
 	UploadStagingDir   string    `json:"uploadStagingDir"`   // 分片上传暂存目录（多实例需共享）
 	TrashRetentionDays int       `json:"trashRetentionDays"` // 回收站保留天数（需求4），默认 30
-	MaxUploadBytes     int64     `json:"maxUploadBytes"`     // 单次上传大小硬上限（字节，0=不限），默认 2GiB（0.3.1）
+	MaxUploadBytes     int64     `json:"maxUploadBytes"`     // 单次上传大小硬上限（字节，0=不限），默认 2GiB
 	AdminPassword      string    `json:"adminPassword"`      // 超管口令重置触发器（需求32，0.1.0）：非空=启动时以其为明文重置超管账户文件，用后清空
 
 	AI        AICfg        `json:"ai"`
 	TLS       TLSCfg       `json:"tls"`
 	Session   SessionCfg   `json:"session"`
+	Auth      AuthCfg      `json:"auth"` // 三层认证图（0.2.3）
 	Anonymous AnonymousCfg `json:"anonymous"`
 	RateLimit RateLimitCfg `json:"rateLimit"`
 	Versions  VersionsCfg  `json:"versions"`
@@ -165,7 +188,7 @@ type Config struct {
 
 // DefaultConfig 返回带全部默认值的配置。
 func DefaultConfig() *Config {
-	// 0.7.0 注意：此处刻意**不**给 SecretFile/TrashDir/UploadStagingDir/
+	// 注意：此处刻意**不**给 SecretFile/TrashDir/UploadStagingDir/
 	// Versions.Dir/db.dsn 种默认值——它们在 finalize 中从 DataDir 派生
 	// （LoadConfig 先 unmarshal 到带默认值的结构，非空种子会让"填空"逻辑失效）。
 	c := &Config{
@@ -177,6 +200,7 @@ func DefaultConfig() *Config {
 		TrashRetentionDays: 30,
 		MaxUploadBytes:     2 << 30,
 		Session:            SessionCfg{AccessTTL: "1h", IdleDays: 21},
+		Auth:               AuthCfg{MemMaxEntries: 200000, MemTTL: "5m", RedisMaxEntries: 5000000, SweepInterval: "10m", TouchWriteEvery: "10m"},
 		Anonymous:          AnonymousCfg{Enabled: true},
 		Versions:           VersionsCfg{Enabled: true, MaxVersions: 10},
 		TLS:                TLSCfg{AutoSelfSign: true},
@@ -270,15 +294,15 @@ func finalize(c *Config) (*Config, error) {
 			return nil, fmt.Errorf("config: adminAccess.ips 条目 %q 不是合法 IP 或 CIDR", s)
 		}
 	}
-	// 数据根目录（0.7.0）：其余落盘路径未显式配置时由它派生；取绝对路径，
-	// 避免多实例/换工作目录后语义漂移（0.6.x 旧配置的显式值原样生效，不受影响）。
+	// 数据根目录：其余落盘路径未显式配置时由它派生；取绝对路径，
+	// 避免多实例/换工作目录后语义漂移（旧配置的显式值原样生效，不受影响）。
 	if c.DataDir == "" {
 		c.DataDir = "./data"
 	}
 	if abs, err := AbsClean(c.DataDir); err == nil {
 		c.DataDir = abs
 	}
-	// 元数据库（0.3.0；0.1.1 起空或 "none" = 内置文件存储，全功能可用，不再降级）；
+	// 元数据库（0.1.1 起空或 "none" = 内置文件存储，全功能可用，不再降级）；
 	// 非法值（含 0.2.x 的 json/memory）直接报错，给出明确指引。
 	dbDriver, err := store.NormalizeDriver(c.DB.Driver)
 	if err != nil {
@@ -307,7 +331,7 @@ func finalize(c *Config) (*Config, error) {
 			c.Cache.Redis.ACLTTLSeconds = 60
 		}
 	}
-	// 未显式配置的落盘路径从 DataDir 派生（0.7.0）
+	// 未显式配置的落盘路径从 DataDir 派生
 	if c.TrashDir == "" {
 		c.TrashDir = filepath.Join(c.DataDir, "trash")
 	}
@@ -325,6 +349,22 @@ func finalize(c *Config) (*Config, error) {
 	}
 	if c.Session.IdleDays <= 0 {
 		c.Session.IdleDays = 21
+	}
+	// 三层认证图默认（0.2.3）
+	if c.Auth.MemMaxEntries <= 0 {
+		c.Auth.MemMaxEntries = 200000
+	}
+	if c.Auth.MemTTL == "" {
+		c.Auth.MemTTL = "5m"
+	}
+	if c.Auth.RedisMaxEntries <= 0 {
+		c.Auth.RedisMaxEntries = 5000000
+	}
+	if c.Auth.SweepInterval == "" {
+		c.Auth.SweepInterval = "10m"
+	}
+	if c.Auth.TouchWriteEvery == "" {
+		c.Auth.TouchWriteEvery = "10m"
 	}
 	if c.Versions.MaxVersions <= 0 {
 		c.Versions.MaxVersions = 10
@@ -364,11 +404,11 @@ func finalize(c *Config) (*Config, error) {
 			return nil, fmt.Errorf("config: root entry needs id and path")
 		}
 		if strings.ContainsRune(r.ID, ':') {
-			// 0.5.0：':' 是虚拟根 id（physID:subPath）的分隔符，物理根 id 禁止使用
+			// ':' 是虚拟根 id（physID:subPath）的分隔符，物理根 id 禁止使用
 			return nil, fmt.Errorf("config: root id %q must not contain ':'", r.ID)
 		}
 		if strings.HasPrefix(r.ID, "_") {
-			// 0.7.0："_" 前缀保留给服务端内部合成根（如用户主目录根 "_users"）
+			// "_" 前缀保留给服务端内部合成根（如用户主目录根 "_users"）
 			return nil, fmt.Errorf("config: root id %q is reserved (leading '_')", r.ID)
 		}
 		if seen[r.ID] {
@@ -387,14 +427,14 @@ func finalize(c *Config) (*Config, error) {
 	return c, nil
 }
 
-// UsersDir 用户主目录的父目录（0.7.0）：<dataDir>/Users。
+// UsersDir 用户主目录的父目录：<dataDir>/Users。
 // 该目录作为服务端内部合成根（store.HomeRootID）注入 scope，不写回配置文件 roots。
 func (c *Config) UsersDir() string { return filepath.Join(c.DataDir, "Users") }
 
 // HomeDir 某用户的家目录绝对路径（用户名须先经 fileops.UsernameAsDir 校验）。
 func (c *Config) HomeDir(username string) string { return filepath.Join(c.UsersDir(), username) }
 
-// TLSDir 自签证书目录（0.7.0 起归入 dataDir，替代原硬编码 ./data/tls）。
+// TLSDir 自签证书目录（归入 dataDir，替代原硬编码 ./data/tls）。
 func (c *Config) TLSDir() string { return filepath.Join(c.DataDir, "tls") }
 
 // AdminAccountFile 超级管理员账户文件（0.1.0 需求32）：<dataDir>/admin-account.json。
@@ -422,7 +462,8 @@ func (c *Config) AdminAllows(ip net.IP) bool {
 	}
 }
 
-// AccessTTLDuration 解析访问令牌有效期。
+// AccessTTLDuration 解析管理台会话绝对有效期（0.2.3 语义：客户端用户会话
+// 改走滑动窗口，见 IdleDuration；本值仅约束超管/DB 管理员登录会话）。
 func (c *Config) AccessTTLDuration() time.Duration {
 	d, err := time.ParseDuration(c.Session.AccessTTL)
 	if err != nil || d <= 0 {
@@ -431,9 +472,36 @@ func (c *Config) AccessTTLDuration() time.Duration {
 	return d
 }
 
-// IdleDuration 返回 refresh 会话闲置上限（默认 3 周）。
+// IdleDuration 返回用户会话滑动闲置上限（默认 3 周，每次认证请求续期）。
 func (c *Config) IdleDuration() time.Duration {
 	return time.Duration(c.Session.IdleDays) * 24 * time.Hour
+}
+
+// AuthMemTTL 解析进程内认证图条目新鲜期（非法值回落 5m）。
+func (c *Config) AuthMemTTL() time.Duration {
+	d, err := time.ParseDuration(c.Auth.MemTTL)
+	if err != nil || d <= 0 {
+		return 5 * time.Minute
+	}
+	return d
+}
+
+// AuthSweepInterval 解析清扫周期（非法值回落 10m）。
+func (c *Config) AuthSweepInterval() time.Duration {
+	d, err := time.ParseDuration(c.Auth.SweepInterval)
+	if err != nil || d <= 0 {
+		return 10 * time.Minute
+	}
+	return d
+}
+
+// AuthTouchWriteEvery 解析单条目续期最小写回间隔（非法值回落 10m）。
+func (c *Config) AuthTouchWriteEvery() time.Duration {
+	d, err := time.ParseDuration(c.Auth.TouchWriteEvery)
+	if err != nil || d <= 0 {
+		return 10 * time.Minute
+	}
+	return d
 }
 
 func ensureSecretFile(path string) (string, error) {
@@ -473,7 +541,7 @@ func WriteExample(path string) error {
 		"adminListen":        "127.0.0.1:8485", // 管理面独立端口（/admin/ 与 admin API 仅此端口可达）
 		"lanOnly":            true,
 		"instanceId":         "node0",
-		"dataDir":            "./data",                                          // 运行数据根目录（0.7.0）：trash/staging/versions/jwt.secret/sqlite 及 Users/<用户名> 家目录的派生基准
+		"dataDir":            "./data",                                       // 运行数据根目录：trash/staging/versions/jwt.secret/sqlite 及 Users/<用户名> 家目录的派生基准
 		"db":                 map[string]string{"driver": "file", "dsn": ""}, // 默认内置文件存储（全功能，单实例）；dsn 留空=<dataDir>/filestore。配数据库（sqlite3/mysql/postgresql 或管理台"数据库"页热切换）后可携数据迁移；无库降级模式已于 0.1.1 取消
 		"cache":              map[string]any{"enabled": false, "redis": map[string]any{"addr": "127.0.0.1:6379", "password": "", "db": 0, "userTTLSeconds": 300, "aclTTLSeconds": 60}},
 		"roots":              []map[string]string{{"id": "main", "name": "主目录", "path": "./data/root-main"}},
@@ -482,10 +550,11 @@ func WriteExample(path string) error {
 		"trashRetentionDays": 30,
 		"maxUploadBytes":     2147483648,
 		"adminAccess":        map[string]any{"mode": "local", "ips": []string{}}, // 管理界面 IP 准入（需求38）：local 仅本机 / lan 局域网 / any 任何来源 / custom 指定 ips（IP 或 CIDR 列表）
-		"adminPassword":      "",                                                  // 超管口令重置触发器（0.1.0 需求32）：填入明文→启动时写入超管账户文件并提示清空；平时留空
+		"adminPassword":      "",                                                 // 超管口令重置触发器（0.1.0 需求32）：填入明文→启动时写入超管账户文件并提示清空；平时留空
 		"ai":                 map[string]any{"provider": "none", "baseUrl": "", "apiKey": "", "model": "", "maxFileMB": 20},
 		"tls":                map[string]any{"enabled": false, "certFile": "", "keyFile": "", "autoSelfSign": true},
 		"session":            map[string]any{"accessTTL": "1h", "idleDays": 21},
+		"auth":               map[string]any{"memMaxEntries": 200000, "memTTL": "5m", "redisMaxEntries": 5000000, "sweepInterval": "10m", "touchWriteEvery": "10m"}, // 三层认证图（0.2.3）：进程内 LRU 上限/新鲜期、redis 上限、清扫周期、续期写回间隔
 		"anonymous":          map[string]any{"enabled": true},
 		"rateLimit":          map[string]any{"uploadKBps": 0, "downloadKBps": 0, "qps": 0},
 		"corsAllowOrigins":   []string{},
@@ -496,7 +565,7 @@ func WriteExample(path string) error {
 	return os.WriteFile(path, b, 0o644)
 }
 
-// PersistDBEdit 以最小侵入方式改写配置文件中的 db 段（0.7.0 管理台配库）。
+// PersistDBEdit 以最小侵入方式改写配置文件中的 db 段（管理台配库）。
 // 读原始 JSON → 只替换 db.driver/db.dsn → MarshalIndent 回写，先备份
 // <path>.bak-<时间戳>（复用 LoadConfig 迁移回写模式）。未知字段保留；
 // **绝不整体序列化 Config**——那会把运行期物化的 jwtSecret 明文写回文件。

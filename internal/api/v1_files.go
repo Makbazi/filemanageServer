@@ -29,10 +29,10 @@ type pathReq struct {
 	NewName string   `json:"newName"`
 }
 
-// handleRoots GET /api/v1/roots（0.5.0 jail 模型）。
+// handleRoots GET /api/v1/roots（jail 模型）。
 // 登录用户：管理员分配给自己的目录（user_roots）+ ACL 分享给自己的目录；
 // 匿名：仅"公开共享目录"清单（public-view ACL）；
-// 降级模式：plain 配置根（0.3.x 行为）。物理配置根对用户端口主体不可见。
+// 降级模式：plain 配置根。物理配置根对用户端口主体不可见。
 func (s *Server) handleRoots(c *gin.Context) {
 	type rootView struct {
 		ID   string `json:"id"`
@@ -62,7 +62,7 @@ func (s *Server) handleRoots(c *gin.Context) {
 			}
 		}
 	}
-	// 输出顺序确定性：配置根按声明序，其后内部合成根（_users，0.7.0）按 id 排序
+	// 输出顺序确定性：配置根按声明序，其后内部合成根（_users）按 id 排序
 	ordered := make([]string, 0, len(s.Roots))
 	seen := map[string]bool{}
 	for i := range s.Cfg.Roots {
@@ -94,7 +94,7 @@ func (s *Server) handleRoots(c *gin.Context) {
 }
 
 // handleList GET /api/v1/files?rootId=&path=（需 View 权限；匿名可浏览，需求6）。
-// 0.5.0：rootId 为虚拟根 id，返回条目路径相对该根（显示路径）。
+// rootId 为虚拟根 id，返回条目路径相对该根（显示路径）。
 func (s *Server) handleList(c *gin.Context) {
 	rootID := c.Request.URL.Query().Get("rootId")
 	rel := fileops.CleanRel(c.Request.URL.Query().Get("path"))
@@ -124,7 +124,7 @@ func (s *Server) handleList(c *gin.Context) {
 	}
 	entries := make([]FileEntry, 0, len(dirs))
 	for _, d := range dirs {
-		// 0.7.0 需求3：家目录内嵌回收站目录对用户不可见（scope 已拦截其内容访问）
+		// 需求3：家目录内嵌回收站目录对用户不可见（scope 已拦截其内容访问）
 		if sc.PhysID == store.HomeRootID && sc.Disp == "" && d.Name() == fileops.HomeTrashName {
 			continue
 		}
@@ -133,7 +133,7 @@ func (s *Server) handleList(c *gin.Context) {
 			continue
 		}
 		e := sc.entry(filepath.Join(sc.Abs, d.Name()), info)
-		// 跳过无查看权限的子条目（被 public/用户 ACL 收紧项不得在父列表暴露，0.3.1）
+		// 跳过无查看权限的子条目（被 public/用户 ACL 收紧项不得在父列表暴露）
 		if !view(e.Path).View {
 			continue
 		}
@@ -208,10 +208,14 @@ const maxMkdirPaths = 1000
 // 加性端点，旧客户端不调用即无感）。
 // body {rootId, paths:["a","a/b",...]}，需 Upload 权限。两阶段：
 // ① 全量校验——CleanRel 归一去重（空 rel=根自身，幂等跳过）、permsBatch 逐路径裁
-//   Upload（同 handleList 模式，ACL 只装载一次）、scope 逐路径做 jail/未知根/保留名
-//   校验；任一失败整请求 4xx 且**不创建任何东西**，客户端可安全整体重试。
+//
+//	Upload（同 handleList 模式，ACL 只装载一次）、scope 逐路径做 jail/未知根/保留名
+//	校验；任一失败整请求 4xx 且**不创建任何东西**，客户端可安全整体重试。
+//
 // ② 创建——逐路径持 transfer.Key 锁 MkdirAll（串行取锁避免死锁；幂等：已存在目录
-//   为 no-op；中途 I/O 失败 fail-fast，已建目录保留，重试幂等，语义同 handleMove 循环）。
+//
+//	为 no-op；中途 I/O 失败 fail-fast，已建目录保留，重试幂等，语义同 handleMove 循环）。
+//
 // 与 handleMkdir 一致：不入 store、不存版本（目录元数据由 handleList 懒登记）。
 func (s *Server) handleMkdirs(c *gin.Context) {
 	var req pathReq
@@ -279,7 +283,7 @@ func (s *Server) handleRename(c *gin.Context) {
 		writeErr(c, statusOf(err), err)
 		return
 	}
-	// 0.7.0：家目录内禁止把任何条目改名成保留回收站目录名（scope 不经过目标名）
+	// 家目录内禁止把任何条目改名成保留回收站目录名（scope 不经过目标名）
 	if sc.PhysID == store.HomeRootID && req.NewName == fileops.HomeTrashName {
 		writeErr(c, http.StatusBadRequest, errors.New("reserved directory name"))
 		return
@@ -425,7 +429,7 @@ func (s *Server) handleDelete(c *gin.Context) {
 			writeErr(c, statusOf(err), err)
 			return
 		}
-		// 授权基座本身（家目录/jail 根）不可删——0.7.0 修复：旧判定只防物理根，
+		// 授权基座本身（家目录/jail 根）不可删——修复：旧判定只防物理根，
 		// jailed 用户可删掉自己的 jail 基座（含家目录）。
 		if sc.Abs == sc.Root.Path || sc.Abs == sc.BaseAbs {
 			writeErr(c, http.StatusBadRequest, errors.New("cannot delete assigned root/home itself"))
@@ -437,7 +441,7 @@ func (s *Server) handleDelete(c *gin.Context) {
 			return
 		}
 		trashID := fileops.RandomHex(8)
-		// 0.7.0 需求3：有家目录的用户回收站实体进 <home>/.fmtrash/，无家目录回退中央目录
+		// 需求3：有家目录的用户回收站实体进 <home>/.fmtrash/，无家目录回退中央目录
 		dst := s.trashBlobPath(u, trashID)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			writeErr(c, statusOf(err), err)
@@ -559,7 +563,7 @@ func (s *Server) handleSearch(c *gin.Context) {
 				continue
 			}
 			rel := fileops.RelOf(sc.BaseAbs, p) // 显示路径（相对命中的授权基座）
-			// 跳过无查看权限的子条目（目录不递归、文件不出现在结果，0.3.1 起文件同样过滤）
+			// 跳过无查看权限的子条目（目录与文件均按查看权限过滤，不可见者不进结果）
 			if !view(rel).View {
 				continue
 			}

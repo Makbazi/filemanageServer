@@ -1,4 +1,4 @@
-// scope.go 虚拟根（jail 模型）解析——0.5.0 权限模型的唯一翻译层。
+// scope.go 虚拟根（jail 模型）解析——权限模型的唯一翻译层。
 //
 // 规则（用户决策）：
 //   - 管理员在管理端口为用户分配 (物理根, 子目录)，即 user_roots；用户在
@@ -9,7 +9,7 @@
 //     （ACL/版本/回收站/上传会话/file_meta/分享链接）一律用 (physID, 物理路径)，
 //     客户端只见相对所命中 base 的显示路径。
 //   - 管理端口（adminScope 中间件）按物理根全量工作，base=""，管理台直接维护物理路径。
-//   - 降级模式（无元数据库）保持 0.3.x 形态：plain 配置根（匿名按 D1 仅浏览不可下载）。
+//   - 降级模式（无元数据库）为 plain 配置根形态（匿名按 D1 仅浏览不可下载）。
 package api
 
 import (
@@ -33,7 +33,7 @@ const basesKey = "fm.bases"
 
 var errNoRootAccess = errors.New("root not assigned to this principal")
 
-// errReservedName 家目录内保留目录（.fmtrash，0.7.0 内嵌回收站）不可经文件 API 访问。
+// errReservedName 家目录内保留目录（.fmtrash，内嵌回收站）不可经文件 API 访问。
 var errReservedName = errors.New("reserved directory not accessible")
 
 // hasSegment 路径 p（slash 相对路径）的任一段是否等于 seg。
@@ -134,7 +134,7 @@ func (s *Server) computeBases(c *gin.Context) (map[string][]string, error) {
 		return out, nil
 	}
 	if !s.dbReady() {
-		// 降级模式：plain 配置根整根基座（0.3.x 形态）；内部家目录根**不暴露**
+		// 降级模式：plain 配置根整根基座；内部家目录根**不暴露**
 		// （无用户体系时整根基座等于让任意主体浏览全部用户家目录，需求3/6 拒绝）
 		for id := range s.Roots {
 			if id == store.HomeRootID {
@@ -162,10 +162,10 @@ func (s *Server) computeBases(c *gin.Context) (map[string][]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 0.6.0（需求13）：他人的 public-view 目录对登录主体同样可见（只读基座，
+	// 需求13：他人的 public-view 目录对登录主体同样可见（只读基座，
 	// perm 引擎对命中 public 条目的登录主体强制仅 View；属主走自有分配短路不受影响）。
 	// 注意：只加在请求基座，不加入 basesForUser——后者被分享断链校验共用，
-	// 保持"创建者分配被回收 → 链接立即 410"的 0.5.0 语义。
+	// 保持"创建者分配被回收 → 链接立即 410"的语义。
 	acls, err := s.Store.ListPublicViewACLs()
 	if err != nil {
 		return nil, err
@@ -191,7 +191,7 @@ func (s *Server) computeBases(c *gin.Context) (map[string][]string, error) {
 
 // basesForUser 登录主体的授权基座集合：分配目录（user_roots）+ ACL 分享给我的
 // 目录（user 精确 / group 归属且 view；已处于自有 base 之下的跳过）。
-// computeBases 与分享链接"权限回收即断链"校验共用此逻辑（0.5.0）。
+// computeBases 与分享链接"权限回收即断链"校验共用此逻辑。
 func (s *Server) basesForUser(u *store.User) (map[string][]string, error) {
 	out := map[string][]string{}
 	for id := range s.Roots {
@@ -295,7 +295,7 @@ func (s *Server) scope(c *gin.Context, rootID, rel string) (*scopeInfo, error) {
 		return nil, fmt.Errorf("%w: %q", errNoRootAccess, physID)
 	}
 	cand := joinSlash(jail, rel)
-	// 0.7.0 需求3：家目录内 .fmtrash 为服务端回收站内核——列表不可见（handleList
+	// 需求3：家目录内 .fmtrash 为服务端回收站内核——列表不可见（handleList
 	// 过滤）、读写一律 403（在此集中拦截：list/upload/mkdir/move/copy/delete/stat）；
 	// 回收站实体只经 v1_trash.go/cleaner.go 的内部路径解析操作，不走本翻译层。
 	if physID == store.HomeRootID && hasSegment(cand, fileops.HomeTrashName) {
@@ -321,7 +321,7 @@ func (s *Server) scope(c *gin.Context, rootID, rel string) (*scopeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 0.5.1：root 内预存符号链接不得成为逃逸通道（集中在此一处防护）
+	// root 内预存符号链接不得成为逃逸通道（集中在此一处防护）
 	if err := fileops.EnsureNoEscape(baseAbs, abs); err != nil {
 		return nil, err
 	}
@@ -332,7 +332,7 @@ func (s *Server) scope(c *gin.Context, rootID, rel string) (*scopeInfo, error) {
 }
 
 // scopePhys 从物理存储键 (rootID, physPath) 反查授权范围——供上传会话完成、
-// 版本回滚、回收站还原等"存储键回流入 API"的路径使用（0.6.0 修复：0.5.0 直接
+// 版本回滚、回收站还原等"存储键回流入 API"的路径使用（既往修复：此前直接
 // 以物理根 id 调 scope 会把 jailed 用户误判为越权 403，仅整根分配/管理员可用）。
 // 语义等价于 scope(c, vrootID(physID, phys), "")：phys 必须落在调用者任一授权
 // 基座内（分配回收/ACL 收回在此拒绝），命中最长匹配 base。

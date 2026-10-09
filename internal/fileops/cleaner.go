@@ -17,7 +17,7 @@ import (
 type Cleaner struct {
 	Store      store.Store
 	TrashDir   string
-	UsersDir   string        // <dataDir>/Users（0.7.0：家目录内嵌回收站清理需要）
+	UsersDir   string        // <dataDir>/Users（家目录内嵌回收站清理需要）
 	Retention  time.Duration // 回收站保留时长
 	StagingDir string        // 分片上传暂存目录
 	Interval   time.Duration // 巡检周期，默认 1h
@@ -44,7 +44,7 @@ func (c *Cleaner) Run(ctx context.Context) {
 
 func (c *Cleaner) runOnce() {
 	if store.Degraded(c.Store) {
-		// 降级模式（0.3.0）：无元数据库可清，仅扫孤儿暂存目录（无会话记录，全部按孤儿判定）
+		// 降级模式：无元数据库可清，仅扫孤儿暂存目录（无会话记录，全部按孤儿判定）
 		c.sweepStaging(nil)
 		return
 	}
@@ -56,7 +56,7 @@ func (c *Cleaner) runOnce() {
 	if err := c.Store.DeleteExpiredSessions(time.Now()); err != nil {
 		log.Printf("cleaner: sessions: %v", err)
 	}
-	// 审计日志保留 90 天（0.5.1）
+	// 审计日志保留 90 天
 	if err := c.Store.DeleteAuditBefore(time.Now().Add(-90 * 24 * time.Hour)); err != nil {
 		log.Printf("cleaner: audit: %v", err)
 	}
@@ -86,7 +86,7 @@ func (c *Cleaner) cleanTrash() (int, error) {
 	return n, nil
 }
 
-// removeTrashBlob 清理回收站实体的两候选位置（0.7.0）：
+// removeTrashBlob 清理回收站实体的两候选位置：
 // 家目录内 .fmtrash（用户名可安全作目录名时）与中央遗留路径。
 func (c *Cleaner) removeTrashBlob(it *store.TrashItem) {
 	if c.UsersDir != "" {

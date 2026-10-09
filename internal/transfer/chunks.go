@@ -124,7 +124,7 @@ func ChunkCount(sess *store.UploadSession) int64 {
 // MaxChunkBytes 指定分片允许的最大字节数（末分片按余数，其余等于 ChunkSize）。
 func MaxChunkBytes(sess *store.UploadSession, index int64) int64 {
 	if sess.Size == 0 {
-		return 0 // 空文件会话：占位分片必须为 0 字节（0.3.1 修复 size=0 超额灌入）
+		return 0 // 空文件会话：占位分片必须为 0 字节（修复 size=0 超额灌入）
 	}
 	total := ChunkCount(sess)
 	if index == total-1 && sess.Size%sess.ChunkSize != 0 {
@@ -147,7 +147,7 @@ func (m *Manager) WriteChunk(sess *store.UploadSession, index int64, body io.Rea
 		return err
 	}
 	final := filepath.Join(dir, strconv.FormatInt(index, 10)+".part")
-	// 限制单片大小，防御恶意超发（0 字节分片严格执行，不给冗余，0.3.1）
+	// 限制单片大小，防御恶意超发（0 字节分片严格执行，不给冗余）
 	limit := MaxChunkBytes(sess, index)
 	if limit > 0 {
 		limit += MaxChunkSlack

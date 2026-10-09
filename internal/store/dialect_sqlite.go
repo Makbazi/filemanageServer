@@ -32,7 +32,7 @@ func sqliteDDL() []string {
 			rel_path TEXT NOT NULL, name TEXT NOT NULL, is_dir INTEGER NOT NULL,
 			size INTEGER NOT NULL, deleted_at DATETIME NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_desc_text ON ai_descriptions(user_id)`,
-		// ---- v0.2.0 新增表（幂等，旧库自动升级） ----
+		// ---- 新增表（幂等，旧库自动升级） ----
 		`CREATE TABLE IF NOT EXISTS groups (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL UNIQUE,
@@ -73,7 +73,7 @@ func sqliteDDL() []string {
 			uploaded_chunks TEXT NOT NULL DEFAULT '[]',
 			status TEXT NOT NULL DEFAULT 'uploading',
 			created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)`,
-		// ---- v0.5.0 新增表（幂等，旧库自动升级；只增不改已发布表） ----
+		// ---- 新增表（幂等，旧库自动升级；只增不改已发布表） ----
 		`CREATE TABLE IF NOT EXISTS user_roots (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL, root_id TEXT NOT NULL,
@@ -91,5 +91,15 @@ func sqliteDDL() []string {
 		`CREATE INDEX IF NOT EXISTS idx_versions_path ON file_versions(root_id, path)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_exp ON sessions(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_trash_deleted ON trash_items(deleted_at)`,
+		// ---- 0.2.3 auth_sessions（三层认证图持久层；幂等，旧库自动升级；只增不改已发布表） ----
+		`CREATE TABLE IF NOT EXISTS auth_sessions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			kind TEXT NOT NULL DEFAULT 'user', user_id INTEGER NOT NULL,
+			username TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '',
+			super INTEGER NOT NULL DEFAULT 0, gen INTEGER NOT NULL DEFAULT 0,
+			ref TEXT NOT NULL DEFAULT '', token_hash TEXT NOT NULL UNIQUE,
+			expires_at DATETIME NOT NULL, last_used_at DATETIME NOT NULL,
+			created_at DATETIME NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS idx_authsess_exp ON auth_sessions(expires_at)`,
 	}
 }

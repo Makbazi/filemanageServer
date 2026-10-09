@@ -26,7 +26,7 @@ func (s *Server) handleVersionList(c *gin.Context) {
 		writeErr(c, http.StatusForbidden, errors.New("permission denied: view"))
 		return
 	}
-	// 版本索引按物理键存储（0.5.0）
+	// 版本索引按物理键存储
 	sc, err := s.scope(c, rootID, rel)
 	if err != nil {
 		writeErr(c, statusOf(err), err)

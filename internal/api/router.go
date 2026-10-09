@@ -1,4 +1,4 @@
-// Package api 的路由装配（0.3.0：gin 路由器分组，需求17 统一 /api/v1）。
+// Package api 的路由装配（gin 路由器分组，需求17 统一 /api/v1）。
 // 外部契约（路径/方法/参数/错误信封/状态码）与 0.2.x 的 net/http 版本逐一对应，
 // 客户端无需感知服务端框架切换。
 package api
@@ -14,7 +14,7 @@ import (
 	"filemanageServer/internal/version"
 )
 
-// Handler 用户/客户端端口路由（0.5.0 起不含任何管理路由：/admin/ 与
+// Handler 用户/客户端端口路由（不含任何管理路由：/admin/ 与
 // /api/v1/admin/* 只在管理端口 AdminHandler 上可达，两端口完全独立）。
 // 返回 *gin.Engine（实现 http.Handler），main.go 以 http.Serve/ServeTLS 承载。
 // 将来新增 API 版本时：新建 registerV2(e) 并追加到 APIVersions 即可，
@@ -32,7 +32,7 @@ func (s *Server) Handler() *gin.Engine {
 func (s *Server) AdminHandler() *gin.Engine {
 	e := s.newEngine(s.adminIPFilter(), s.adminScope())
 	s.registerV1(e)
-	// 0.7.0：数据库配置面注册在 requireDB 之外（降级模式可达）；0.1.0 需求33
+	// 数据库配置面注册在 requireDB 之外（降级模式可达）；0.1.0 需求33
 	// 起闸门收敛为单一态（超管/DB 管理员登录态，超管无库可用），见 v1_dbconfig.go
 	s.registerAdminDBAPI(e)
 	// 0.1.0 需求33：超管直接登录使降级模式管理台可完整工作——info/super 注册在
@@ -72,7 +72,7 @@ func (s *Server) newEngine(netGuard gin.HandlerFunc, extra ...gin.HandlerFunc) *
 	e.NoMethod(func(c *gin.Context) {
 		writeErr(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 	})
-	// 全局中间件顺序：logger 最外 → 网络准入 → QPS → CORS（0.5.1）→（管理端口）adminScope → 业务
+	// 全局中间件顺序：logger 最外 → 网络准入 → QPS → CORS →（管理端口）adminScope → 业务
 	e.Use(loggerGin(), netGuard, s.qpsLimit(), s.corsGin())
 	for _, h := range extra {
 		e.Use(h)
@@ -82,7 +82,7 @@ func (s *Server) newEngine(netGuard gin.HandlerFunc, extra ...gin.HandlerFunc) *
 }
 
 // handleAPIVersions GET /api → 支持的 API 版本列表。
-// adminUI 字段仅在管理端口出现（0.5.0：管理面与用户端口物理隔离）。
+// adminUI 字段仅在管理端口出现（管理面与用户端口物理隔离）。
 func (s *Server) handleAPIVersions(c *gin.Context) {
 	out := map[string]any{
 		"server":      version.Version,
@@ -124,7 +124,7 @@ func (s *Server) registerV1(e *gin.Engine) {
 	shr.GET("/files", s.handleShareFiles)
 	shr.GET("/download", s.handleShareDownload)
 
-	// ---- 可匿名浏览（需求6：未登录按 public ACL 只读；0.3.0 降级模式亦走此组）----
+	// ---- 可匿名浏览（需求6：未登录按 public ACL 只读；降级模式亦走此组）----
 	// download/preview 在此组但内部按模式分支：有库时 requirePerm(Download) 强制
 	// 登录（与 0.2.x 契约一致，匿名 401），无库时放开匿名下载（用户决策）。
 	anon := v1.Group("", s.authCtx())
@@ -189,7 +189,7 @@ func (s *Server) registerV1(e *gin.Engine) {
 	auth.POST("/ai/search", s.handleAISearch)
 }
 
-// registerAdminAPI 管理员组（0.5.0：仅注册在管理端口 AdminHandler 上，
+// registerAdminAPI 管理员组（仅注册在管理端口 AdminHandler 上，
 // 用户端口不存在这些路由——404；0.1.0：info/super 已移至 AdminHandler 的
 // lite 组（组外 requireDB），本组全部端点仍需元数据库）。
 func (s *Server) registerAdminAPI(admin *gin.RouterGroup) {
@@ -209,5 +209,5 @@ func (s *Server) registerAdminAPI(admin *gin.RouterGroup) {
 	admin.DELETE("/groups/:id", s.handleAdminDeleteGroup)
 	admin.GET("/acls", s.handleAdminListACLs)
 	admin.GET("/links", s.handleAdminListLinks)
-	admin.GET("/audits", s.handleAdminListAudits) // 0.5.1 审计日志
+	admin.GET("/audits", s.handleAdminListAudits) // 审计日志
 }

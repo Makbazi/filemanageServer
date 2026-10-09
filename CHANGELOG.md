@@ -10,12 +10,12 @@
 
 | filemanageServer | 元数据存储 | 兼容 filemanageClient |
 |---|---|---|
-| 0.2.x（当前 **0.2.2**） | 自含（同 0.1.x；0.2.2 仅 `GET /thumb` 白名单扩 BMP（thumbdec.go 纯标准库自实现），无新端点/新表/新列、schemaVersion 保持 8） | **Client 0.3.3 推荐基线（服务端网格 BMP 出图=本地缩放机制）**；Client 0.3.2/0.2.x 无感可用且 BMP 由 415 变 200 为纯增益面（旧客户端 size_hint 回退语义不变）；Client 0.1.x 及以下同 |
-| 0.2.1 | 自含（同 0.1.x；0.2.1 纯 API 面加性 `GET /thumb`+`POST /check` 与静默修复，无新表/新列、schemaVersion 保持 8） | **Client 0.3.2 完整功能（浏览零下载+目录重传预检依赖本版本端点）**；Client 0.2.0/0.3.x 早期版本全功能无感（不调用新端点即无感）；Client 0.1.x 及以下同 |
-| 0.2.0 | 自含（同 0.1.x；0.2.0 纯 API 面增项 `POST /api/v1/mkdirs`） | **Client 0.2.0 完整功能（目录上传）**；Client 0.1.x 及以下全功能无感（mkdirs 为加性端点，旧客户端不调用） |
-| 0.1.x | **自含**；0.1.1 新增内置 `file` 驱动（无库默认，全功能）+ 切换/导出/暂停管理面，SQL 表结构无变更 | **Client 0.1.0 完整功能**；0.6.x/0.5.x 客户端功能完整（0.1.1 为服务端存储引擎与管理面增项，`/api/v1` 数据协议零变更；health 的 `db` 字段可为 `"file"`、暂停期返回 503——均为客户端既有容错路径，旧客户端无感）；**Client 0.2.0 配本系列服务端时目录上传自动退化为逐个 `mkdir`（幂等递归，语义一致、仅往返更多）** |
+| 0.2.x（当前 **0.2.3**） | 自含（同 0.1.x；0.2.3 认证重构：新表 `auth_sessions`（幂等增量，四方言+file 驱动）、配置 schemaVersion 8→9（auth 段）、`golang-jwt` 依赖移除；旧 `sessions` 表冻结不再读写但保留磁盘兼容） | **Client 0.3.4 推荐基线**（认证协议字段形状零变更，0.3.4 与 0.1.x–0.3.3 全部客户端登录/刷新/分享/管理台全链路可用）；**一次性代价**：升级到本版本后所有既有 JWT 访问令牌/refresh 令牌/分享 st 令牌失效，各账户重新登录一次（此后行为与旧客户端完全一致）|
+| 0.2.2 | 自含（同 0.1.x；仅 `GET /thumb` 白名单扩 BMP（thumbdec.go 纯标准库自实现），无新端点/新表/新列、schemaVersion 保持 8） | Client 0.3.3（服务端网格 BMP 出图=本地缩放机制）；Client 0.3.2/0.2.x 无感可用且 BMP 由 415 变 200 为纯增益面（旧客户端 size_hint 回退语义不变）；Client 0.1.x 及以下同 |
+| 0.2.1 | 自含（同 0.1.x；纯 API 面加性 `GET /thumb`+`POST /check` 与静默修复，无新表/新列、schemaVersion 保持 8） | **Client 0.3.2 完整功能（浏览零下载+目录重传预检依赖本版本端点）**；Client 0.2.0/0.3.x 早期版本全功能无感（不调用新端点即无感）；Client 0.1.x 及以下同 |
+| 0.2.0 | 自含（同 0.1.x；纯 API 面增项 `POST /api/v1/mkdirs`） | **Client 0.2.0 完整功能（目录上传）**；Client 0.1.x 及以下全功能无感（mkdirs 为加性端点，旧客户端不调用） |
+| 0.1.x | **自含**；0.1.1 新增内置 `file` 驱动（无库默认，全功能）+ 切换/导出/暂停管理面，SQL 表结构无变更 | **Client 0.1.0 完整功能**（0.1.1 为服务端存储引擎与管理面增项，`/api/v1` 数据协议零变更；health 的 `db` 字段可为 `"file"`、暂停期返回 503——均为客户端既有容错路径，旧客户端无感）；**Client 0.2.0 配本系列服务端时目录上传自动退化为逐个 `mkdir`（幂等递归，语义一致、仅往返更多）** |
 | 0.1.0 | 自含（表结构无变更；会话 user_id=0 超管哨兵） | 同上（0.1.1 无破坏性协议变更，0.1.0 客户端对 0.1.1 服务端全功能） |
-| ≤0.7.1 | 自含 | 见 git 历史（已按需求39清空） |
 
 ## 未发布版本
 
@@ -42,6 +42,61 @@
   版本号落到 `"unknown"`。设 `FM_VERSION=x.y.z ./build.sh -a all` 可跳过 git 推导固定版本
   （此时也不追加 `-dirty`）；亦可在流水线先 `git fetch --tags --force`（浅克隆加
   `--unshallow`）并 `git config --global --add safe.directory "$WORKSPACE"` 让 tag 真正可用。
+
+## [0.2.3] - 2026-10-09（认证重构：去 JWT，服务端三层认证图；本批用户清单第 2 条；tag 由维护者打）
+
+### 新增
+- **三层认证图（`internal/auth` 整包重写，`golang-jwt` 依赖移除）**：身份认证不再使用
+  JWT——客户端认证通过后**只拿到一个随机哈希凭证**（32 字节随机数 hex，无任何内部结构、
+  不编码身份）；真实 user id/username/role/超管标记与凭据纪元全部存服务端认证图。三层结构：
+  **L1 进程内 LRU**（`auth.memMaxEntries` 默认 **200000**，超限 LRU 驱逐；条目新鲜期
+  `auth.memTTL` 默认 5m，超龄强制回源——多实例撤权可见延迟的明示上界）→ **L2 可选 redis**
+  （`cache.enabled` 时自动接入，键 `fm:auth:<sha256(凭证)>` 值 SETEX=剩余有效期；
+  `auth.redisMaxEntries` 默认 **5000000**，ZSET(lastUsed 分数) 近似 LRU 超限裁剪 + 每用户
+  反向集合支撑按用户撤权）→ **L3 持久化 Store**（唯一事实源）。明文凭证永不落任何一层，
+  三层一律以 SHA-256 为键（承接旧 refresh 只存哈希纪律）。
+- **新表 `auth_sessions`（四方言幂等 DDL 只增不改 + file 驱动新表序 14 + pgSeqReset）**：
+  kind(user|share)/user_id(0=超管哨兵；-1=share 保留值防级联误伤)/username/role/super/gen/
+  ref/token_hash UNIQUE/expires_at/last_used_at/created_at + expires 索引；随 `Migrate()`
+  自动建表（sqlite 既有 .db 字节兼容）。**重启恢复**：启动 WarmStart 按 token_hash 稳定
+  窗口预热 L1（上限 memMaxEntries），未预热的冷凭证经读路径惰性回源——重启后既有登录
+  会话持续有效。Store 接口新增 7 个方法（Create/Get/Renew/Delete by hash/Delete by user/
+  DeleteExpired/ListActive），sqlStore（gorm）/fileStore/proxy 全实现，装饰器透传。
+- **过期清扫与滑动刷新**：清扫 goroutine 每 `auth.sweepInterval`（默认 10m）三层回收过期
+  条目、批量写回脏续期、重试 L2 撤销失败项（pendingRevoke 本地兜底拒绝）、修剪 L2 索引。
+  普通用户凭证**滑动闲置窗口**（`session.idleDays` 默认 21 天，每次认证请求 L1 即时前推，
+  L2/L3 按 `auth.touchWriteEvery` 默认 10m 节流写回——硬杀进程至多丢该窗口内续期，
+  凭证提前到期属安全方向）；超管/管理台会话保持绝对 `session.accessTTL`（1h）不滑动，
+  维持"控制台每小时重登"节奏；分享 st 绝对 2h。
+- **配置 schemaVersion 8→9**（需求25：migrate8to9 只补 `auth` 段缺省，绝不覆盖已有值；
+  原文件自动备份）。`jwtSecret`/`secretFile` 字段与 jwt.secret 物化行为保留
+  （存量配置兼容/PersistDBEdit 防泄密纪律），标注 **deprecated——认证不再读取二者**。
+
+### 变更（认证面，协议形状不变）
+- **`/api/v1` 字段形状零变更**：登录/刷新响应仍为 `{token, accessToken, refreshToken,
+  expiresIn, user}`；`refreshToken` 回传**与 token 同一凭证**（兼容别名，旧客户端 ≤0.3.3 的
+  401→refresh→重试链路原样工作——客户端实际只持有一个凭证）。`/auth/refresh` 轮换语义
+  保留（撤旧发新）；`/auth/logout`、`/auth/me`、分享 `verify→?st=` 形状不变。
+  authCtx 不再逐请求 `GetUserByID`（身份直接取认证图条目，读放大显著下降）。
+- **撤权即时性**：登出/轮换/改密/管理员重置密码/角色变更/删号/超管口令轮换一律三层全清；
+  单实例（含 file 存储 flock）即时生效，多实例经共享 L2/L3 立删 + 各实例 L1 陈旧 ≤memTTL。
+- **降级异常路径**（存储不可用，0.1.1 起正常部署不可达）：超管凭证仅 L1/L2、refreshToken
+  为空、重启失效（对齐旧"控制台令牌不落库"形态）；普通用户凭证沿用 503 纵深防御。
+
+### 兼容
+- **推荐配套 Client 0.3.4**（客户端认证代码零改动——其本就对凭证无格式假设）；
+  **所有旧客户端 0.1.x–0.3.3 登录/刷新/分享/管理台全链路兼容**。
+- **升级一次性代价（明示）**：升级到本版本后，存量 JWT 访问令牌、旧 refresh 会话
+  （`sessions` 表）与旧分享 st 一律不再被接受——用户重登一次、分享访客重输一次口令即可。
+- 数据面其余端点零变更；旧 `sessions` 表与其 Store 方法保留不再读写（磁盘兼容，不 ALTER
+  不 DROP）；`user_roots`/`share_links` 等既有表不动。多实例部署注意：认证图 L3 走共享库
+  即跨实例一致；file 存储单实例 flock 形态下无 L1 跨实例问题。
+- Store 接口为契约变更（需求2）：新增 auth_sessions 7 方法 + AuthSession 模型 +
+  Kind/SuperAdminID(-0)/AuthShareUserID(-1) 常量；三方言+file 驱动语义一致。
+- 验证：`go build ./... && go vet ./...` 通过、gofmt 干净；冒烟 37 项断言全绿
+  （file 存储+sqlite3 双引擎：凭证随机形状、refreshToken 同值别名、轮换旧废、logout 三层清、
+  重启 WarmStart 存活、伪造 JWT 串 401、分享 st 身份互斥（kind 门控）、超管纪元轮换即废、
+  改密/重置密码踢线、auth_sessions 落库结构与旧 sessions 表零写入）。
 
 ## [0.2.2] - 2026-10-06（缩略图格式面扩展：GET /thumb 支持 BMP；本批用户清单第 2 条+第 5 条；tag 由维护者打）
 
@@ -130,7 +185,7 @@
 - 其余 `/api/v1` 端点零变更；无新表/新列（Store 接口四方言不动）；schemaVersion 保持 8。
 
 ### 兼容
-- **旧客户端零影响**（不调用即无感）：Client 0.1.x/0.6.x/0.5.x 配本版本全功能。
+- **旧客户端零影响**（不调用即无感）：Client 0.1.x 及同期早期版本配本版本全功能。
 - Client 0.2.0 的目录上传依赖本端点批量建目录骨架（含空目录）；配 Server <0.2.0 时
   自动退化为逐个 `POST /mkdir`（幂等递归，落点语义一致），仍可用。
 
@@ -210,7 +265,7 @@
 
 ### 变更（破坏性，未发布期允许）
 - **降级模式管理台以超管登录（需求33）**：移除 `POST /auth/register` 引导注册与
-  0.7.0 的 `/admin/db/unlock`、firstBoot 开放/`X-DB-Unlock` 三态闸门——配库面收敛为
+  `/admin/db/unlock`、firstBoot 开放/`X-DB-Unlock` 三态闸门——配库面收敛为
   单一管理员登录态；`/admin/db/status` 移除 `firstBoot/needsUnlock` 键、新增
   `superAdmin`。管理 API 拆分：`/admin/info` 与 `/admin/super` 注册于 requireDB
   之外（降级模式可达），其余仍需元数据库。

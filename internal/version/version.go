@@ -1,6 +1,6 @@
 // Package version 提供服务端独立迭代版本号（需求19）。
 // 变更时必须同步更新 CHANGELOG.md，并声明兼容的 filemanageClient
-// 版本范围（需求20；元数据存储层 0.3.0 起已并入本工程 internal/store）。
+// 版本范围（需求20；元数据存储层已并入本工程 internal/store）。
 package version
 
 // Version 服务端版本号，/api/v1/health 与 /admin 界面均引用此处。

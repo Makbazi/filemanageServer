@@ -1,4 +1,4 @@
-// Package api 的 gin 中间件（0.3.0：由 net/http 包装器迁移而来，判定语义与响应
+// Package api 的 gin 中间件（由 net/http 包装器迁移而来，判定语义与响应
 // 信封逐字保持不变）。用户态注入从 request context 改为 gin 键值（c.Set/c.Get）。
 package api
 
@@ -21,7 +21,7 @@ import (
 // userKey gin 上下文键：当前登录用户（*store.User）。
 const userKey = "fm.user"
 
-// errNoDB 降级模式统一错误（0.3.0：未配置元数据库时元数据端点返回 503）。
+// errNoDB 降级模式统一错误（未配置元数据库时元数据端点返回 503）。
 var errNoDB = errors.New("metadata database not configured")
 
 // requireDB 元数据端点守卫：未配置数据库 → 503。
@@ -53,16 +53,20 @@ func (s *Server) maintenanceGate() gin.HandlerFunc {
 	}
 }
 
-// authCtx 可选认证中间件（需求6）：
-//   - 携带有效 Bearer token → 注入登录用户；
+// authCtx 可选认证中间件（需求6；0.2.3 去 JWT 重构）：
+//   - 携带有效 Bearer 凭证 → 经三层认证图（internal/auth.Center）解析身份并注入；
 //   - 未携带 token → 匿名主体（由权限引擎判定可浏览范围）；
-//   - 携带无效/过期 token → 401（提示客户端走 refresh 流程）；
-//   - 降级模式（无元数据库）下携带**普通用户** token → 503（无法校验用户，拒绝冒充）。
+//   - 凭证无效/过期/已撤 → 401（提示客户端走 refresh 流程）；
+//   - 分享解锁凭证（kind=share）不是登录身份 → 一律 401；
+//   - 降级异常路径下携带**普通用户**凭证 → 503（拒绝冒充，requireDB 纵深防御沿用）。
 //
-// 0.1.0 需求32/33/36 重排：先解析 JWT 声明再分流——超管令牌（claims.Super）
-// 校验凭据纪元后注入合成用户，全程零 Store 调用（降级模式同样可用，且天然
-// 绕开 redis 用户缓存）；普通令牌才落库查用户。两分支共用管理员端口隔离
-// 规则：admin 身份（含超管）在用户端口一律 403。
+// 0.1.0 需求32/33/36 语义保留：先解析声明再分流——超管凭证（e.Super）核对
+// 凭据纪元后注入合成用户，全程零 Store 调用（降级模式同样可用，天然绕开
+// redis 用户缓存）；普通凭证的身份直接来自认证图条目（**不再逐请求 GetUserByID**）。
+// 两分支共用管理员端口隔离规则：admin 身份（含超管）在用户端口一律 403。
+// 滑动续期：普通用户条目每次认证 Touch（管理台条目绝对 TTL，不续期——
+// 保持"控制台每小时重登"节奏）。撤权即时性：L3/L2 立删全实例可见；
+// 其他实例 L1 陈旧窗口 ≤ auth.memTTL（条目超龄强制回源，明示延迟上界）。
 func (s *Server) authCtx() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		h := c.Request.Header.Get("Authorization")
@@ -71,13 +75,22 @@ func (s *Server) authCtx() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		cl, err := auth.ParseAccessClaims(s.Cfg.JWTSecret, ts)
+		e, err := s.Auth.Lookup(c.Request.Context(), ts)
 		if err != nil {
+			if errors.Is(err, auth.ErrBadCredential) {
+				writeErr(c, http.StatusUnauthorized, errors.New("token invalid or expired"))
+			} else {
+				writeErr(c, http.StatusServiceUnavailable, err) // 存储故障=服务不可用，不是坏凭证
+			}
+			c.Abort()
+			return
+		}
+		if e.Kind != store.AuthKindUser { // share 凭证走的是 /s/ 链路专用校验，永不代表身份
 			writeErr(c, http.StatusUnauthorized, errors.New("token invalid or expired"))
 			c.Abort()
 			return
 		}
-		if cl.Super {
+		if e.Super {
 			if s.Super == nil { // 防御：未装配超管（仅测试构造可为 nil）
 				writeErr(c, http.StatusUnauthorized, errors.New("superadmin not configured"))
 				c.Abort()
@@ -89,12 +102,12 @@ func (s *Server) authCtx() gin.HandlerFunc {
 				return
 			}
 			gen, serr := s.Super.Generation()
-			if serr != nil || gen != cl.Gen {
+			if serr != nil || gen != e.Gen {
 				writeErr(c, http.StatusUnauthorized, errors.New("superadmin credential changed (password rotated or account file reset), please login again"))
 				c.Abort()
 				return
 			}
-			c.Set(userKey, &store.User{ID: store.SuperAdminID, Username: cl.Username, Role: store.RoleAdmin})
+			c.Set(userKey, &store.User{ID: store.SuperAdminID, Username: e.Username, Role: store.RoleAdmin})
 			c.Next()
 			return
 		}
@@ -103,20 +116,17 @@ func (s *Server) authCtx() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		u, err := s.Store.GetUserByID(cl.UID)
-		if err != nil {
-			writeErr(c, http.StatusUnauthorized, errors.New("user not found"))
-			c.Abort()
-			return
-		}
-		// 0.6.0 决策D3（需求11/12）：管理员身份仅限服务端管理台（adminListen 独立端口），
-		// 用户端口对 admin 的一切请求（含升级前已发 token）一律 403。
-		if u.Role == store.RoleAdmin && !c.GetBool(adminModeKey) {
+		// 端口隔离判据取自认证图条目（登录时刻的角色快照）：管理员角色变更即
+		// 按用户撤权（见 v1_admin），条目角色与库内角色不会出现可被利用的分歧。
+		if e.Role == store.RoleAdmin && !c.GetBool(adminModeKey) {
 			writeErr(c, http.StatusForbidden, errors.New("admin accounts cannot be used on the client API; use the admin console"))
 			c.Abort()
 			return
 		}
-		c.Set(userKey, u)
+		if e.Role != store.RoleAdmin { // 普通用户会话：滑动续期（闲置窗口内活跃即有效）
+			s.Auth.Touch(e, s.Cfg.IdleDuration())
+		}
+		c.Set(userKey, &store.User{ID: e.UserID, Username: e.Username, Role: e.Role})
 		c.Next()
 	}
 }
@@ -207,7 +217,7 @@ func loggerGin() gin.HandlerFunc {
 	}
 }
 
-// ---------- 请求速率与跨域（0.5.1 安全迭代） ----------
+// ---------- 请求速率与跨域（安全迭代） ----------
 
 // qpsWindow 单 IP 的秒级固定窗口计数。
 type qpsWindow struct {
@@ -260,7 +270,7 @@ func (s *Server) qpsLimit() gin.HandlerFunc {
 }
 
 // corsGin 显式 CORS 白名单（corsAllowOrigins，默认空 = 不下发任何 CORS 头，
-// 与 0.3.x 行为一致）。命中白名单回显具体 Origin 并允许预检；不使用通配符
+// 与既有行为一致）。命中白名单回显具体 Origin 并允许预检；不使用通配符
 // 回显（凭证虽关闭，仍按最小面处理）。
 func (s *Server) corsGin() gin.HandlerFunc {
 	allowed := s.Cfg.CORSAllowOrigins
