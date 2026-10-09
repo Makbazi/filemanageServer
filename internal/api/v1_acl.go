@@ -26,7 +26,7 @@ func (s *Server) handleACLGet(c *gin.Context) {
 		writeErr(c, http.StatusForbidden, errors.New("permission denied: view"))
 		return
 	}
-	// 0.5.0：ACL 以物理键存取，响应条目路径换算回显示路径
+	// ACL 以物理键存取，响应条目路径换算回显示路径
 	sc, err := s.scope(c, rootID, rel)
 	if err != nil {
 		writeErr(c, statusOf(err), err)
@@ -100,7 +100,7 @@ func (s *Server) handleACLPut(c *gin.Context) {
 			writeErr(c, http.StatusBadRequest, errors.New("subjectId required for user/group"))
 			return
 		}
-		// 主体存在性校验，拒绝悬空 ACL 条目（0.3.1）
+		// 主体存在性校验，拒绝悬空 ACL 条目
 		var serr error
 		if e.SubjectType == store.SubjectUser {
 			_, serr = s.Store.GetUserByID(e.SubjectID)
@@ -112,7 +112,7 @@ func (s *Server) handleACLPut(c *gin.Context) {
 			return
 		}
 	}
-	// 替换：先删旧条目再写新条目（物理键存储，0.5.0）
+	// 替换：先删旧条目再写新条目（物理键存储）
 	old, err := s.Store.GetFolderACLs(sc.PhysID, sc.Phys)
 	if err != nil {
 		writeErr(c, http.StatusInternalServerError, err)
@@ -174,12 +174,12 @@ func (s *Server) handleACLDelete(c *gin.Context) {
 		return
 	}
 	if u.Role != store.RoleAdmin {
-		// 0.5.0：只能管理自己授权范围内的 ACL 条目（跨 jail 条目直接拒绝）
+		// 只能管理自己授权范围内的 ACL 条目（跨 jail 条目直接拒绝）
 		if _, _, ok := s.displayOf(c, target.RootID, target.Path); !ok {
 			writeErr(c, http.StatusForbidden, errors.New("acl entry outside your scope"))
 			return
 		}
-		// 0.6.0：条目键为物理存储键，经 scopePhys 判定（jailed 用户不再误判 403）
+		// 条目键为物理存储键，经 scopePhys 判定（jailed 用户不再误判 403）
 		if !s.requirePermPhys(c, target.RootID, target.Path,
 			func(d perm.Decision) bool { return d.Share }, "share (manage acl)") {
 			return
@@ -207,7 +207,7 @@ func (s *Server) handleACLSubjects(c *gin.Context) {
 	}
 	uv := make([]map[string]any, 0, len(users))
 	for _, u := range users {
-		// 0.6.0（需求12）：客户端不可见管理员账号（管理台走 /admin/users）。
+		// 需求12：客户端不可见管理员账号（管理台走 /admin/users）。
 		if u.Role == store.RoleAdmin {
 			continue
 		}

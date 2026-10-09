@@ -58,7 +58,7 @@ func (s *Server) handleAIDescribe(c *gin.Context) {
 		writeErr(c, http.StatusBadGateway, err)
 		return
 	}
-	// AI 描述按物理键入库（0.5.0），检索/展示时再换算显示键
+	// AI 描述按物理键入库，检索/展示时再换算显示键
 	desc := &store.AIDescription{
 		UserID: u.ID, RootID: sc.PhysID, Path: sc.Phys,
 		Name: info.Name(), Kind: kind, Text: text, Model: s.AI.Name(),
@@ -110,7 +110,7 @@ func (s *Server) handleAISearch(c *gin.Context) {
 	}
 	out := make([]*store.SearchHit, 0, len(hits))
 	for _, h := range hits {
-		// 命中换算为客户端显示键（越出授权范围的旧记录跳过，0.5.0）
+		// 命中换算为客户端显示键（越出授权范围的旧记录跳过）
 		if rid, disp, ok := s.displayOf(c, h.RootID, h.Path); ok {
 			h.RootID, h.Path = rid, disp
 			out = append(out, h)

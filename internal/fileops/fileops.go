@@ -60,7 +60,7 @@ func JoinRoot(rootPath, rel string) (string, error) {
 	return abs, nil
 }
 
-// EnsureNoEscape 防御 root 内预存符号链接被跟随（0.5.1 安全加固）：
+// EnsureNoEscape 防御 root 内预存符号链接被跟随（安全加固）：
 // 对目标路径（或其最近的已存在祖先）做 EvalSymlinks，要求解链后的真实路径
 // 仍位于授权基目录之内；不存在的路径（写入/创建场景）校验其已存在祖先。
 // baseDir 自身不可解析时返回 nil（让后续真实 IO 报出准确错误）。
@@ -281,7 +281,7 @@ func TrashPath(trashDir string, userID int64, trashID string) string {
 	return filepath.Join(trashDir, fmt.Sprintf("u%d", userID), trashID)
 }
 
-// ErrTooLarge 表示写入流超过配置的硬性大小上限（上传限额，0.3.1）。
+// ErrTooLarge 表示写入流超过配置的硬性大小上限（上传限额）。
 var ErrTooLarge = errors.New("content too large")
 
 // WriteFileAtomic 先写临时文件再 rename，避免半成品（并发保护的一部分）。

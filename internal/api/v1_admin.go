@@ -30,11 +30,11 @@ func (s *Server) handleAdminInfo(c *gin.Context) {
 		"apiVersions":        version.APIVersions,
 		"instanceId":         s.Cfg.InstanceID,
 		"dbDriver":           s.Store.Driver(),
-		"dataDir":            s.Cfg.DataDir, // 运行数据根目录（0.7.0）
+		"dataDir":            s.Cfg.DataDir, // 运行数据根目录
 		"usersDir":           s.Cfg.UsersDir(),
 		"schemaVersion":      s.Cfg.SchemaVersion,
 		"listen":             s.Cfg.Listen,
-		"adminListen":        s.Cfg.AdminListen,  // 管理面独立端口（0.5.0）
+		"adminListen":        s.Cfg.AdminListen,  // 管理面独立端口
 		"adminAccess":        s.Cfg.AdminAccess,  // 管理界面 IP 准入（0.1.0 需求38，只读展示）
 		"superAdminUsername": s.superAdminName(), // 超管账户名（0.1.0 需求32；仅名称事实，不含口令）
 		"maxUploadBytes":     s.Cfg.MaxUploadBytes,
@@ -54,7 +54,7 @@ func (s *Server) handleAdminInfo(c *gin.Context) {
 
 // ---------- 用户管理 ----------
 
-// handleAdminListUsers GET /admin/users → 用户列表（附 0.5.0 目录分配摘要）。
+// handleAdminListUsers GET /admin/users → 用户列表（附目录分配摘要）。
 func (s *Server) handleAdminListUsers(c *gin.Context) {
 	users, err := s.Store.ListUsers()
 	if err != nil {
@@ -119,7 +119,7 @@ func (s *Server) handleAdminUpdateUser(c *gin.Context) {
 		return
 	}
 	// 需求33：超管不在库内、由账户文件管理；先加载目标做分层判定
-	//（0.7.x 之前该接口不加载目标、盲改——现在必须先知道对方是不是管理员）。
+	//（此前该接口不加载目标、盲改——现在必须先知道对方是不是管理员）。
 	if id == store.SuperAdminID {
 		writeErr(c, http.StatusBadRequest, errors.New("超级管理员账户由服务端账户文件管理（见管理台\"超级管理员\"页）"))
 		return
@@ -156,7 +156,7 @@ func (s *Server) handleAdminUpdateUser(c *gin.Context) {
 			writeErr(c, statusOf(err), err)
 			return
 		}
-		_ = s.Store.DeleteSessionsByUser(id) // 改密后强制重新登录
+		_ = s.Auth.RevokeUser(c.Request.Context(), id) // 改密后强制重新登录（认证图三层全清）
 	}
 	if req.Role != "" {
 		role := store.RoleUser
@@ -172,6 +172,11 @@ func (s *Server) handleAdminUpdateUser(c *gin.Context) {
 		if err := s.Store.UpdateUserRole(id, role); err != nil {
 			writeErr(c, statusOf(err), err)
 			return
+		}
+		// 角色变更即吊销该用户全部认证凭证：认证图条目的 role 是登录时刻快照
+		// （不再逐请求查库），撤权强制重登以拿到新角色（0.2.3）。
+		if role != target.Role {
+			_ = s.Auth.RevokeUser(c.Request.Context(), id)
 		}
 	}
 	if req.AllowedRoots != nil {
@@ -216,11 +221,14 @@ func (s *Server) handleAdminDeleteUser(c *gin.Context) {
 		writeErr(c, statusOf(err), err)
 		return
 	}
+	// Store.DeleteUser 已级联清 L3 auth_sessions；再清认证中心 L1/L2（散点/他实例
+	// 凭证靠 L3 删除证伪 + memTTL 陈旧回源兜底，此处主动清本实例上层）。
+	_ = s.Auth.RevokeUser(c.Request.Context(), id)
 	s.audit(c, store.AuditUserDelete, "", 0, "", "", fmt.Sprintf("deleted user id=%d", id))
 	writeJSON(c, http.StatusOK, map[string]any{"ok": true})
 }
 
-// ---------- 用户根分配（0.5.0 jail 模型：管理员分配目录） ----------
+// ---------- 用户根分配（jail 模型：管理员分配目录） ----------
 
 // handleAdminListAllUserRoots GET /admin/userroots → 全部用户分配（总览列）。
 func (s *Server) handleAdminListAllUserRoots(c *gin.Context) {
@@ -298,7 +306,7 @@ func (s *Server) handleAdminSetUserRoots(c *gin.Context) {
 			return
 		}
 		sub := fileops.CleanRel(r.SubPath)
-		// 0.7.0 需求3：内部家目录根的分配即 <dataDir>/Users/<用户名>，
+		// 需求3：内部家目录根的分配即 <dataDir>/Users/<用户名>，
 		// 只允许指向本人用户名（防把他人家目录分配给该用户），且回收站内核不可入分配。
 		if r.RootID == store.HomeRootID {
 			if sub != fileops.CleanRel(target.Username) || fileops.UsernameAsDir(target.Username) != nil {
@@ -328,7 +336,7 @@ func (s *Server) handleAdminSetUserRoots(c *gin.Context) {
 		seen[key] = true
 		urs = append(urs, &store.UserRoot{UserID: id, RootID: r.RootID, SubPath: sub, Alias: r.Alias})
 	}
-	// 0.7.0：本接口为全量替换——丢失家目录行则自动补回（家目录随账号生灭、
+	// 本接口为全量替换——丢失家目录行则自动补回（家目录随账号生灭、
 	// 不可经分配编辑器摘除；用户名不合法的历史遗留不阻塞保存）。
 	hasHome := false
 	for _, r := range urs {
@@ -383,7 +391,7 @@ func (s *Server) handleAdminBrowseFS(c *gin.Context) {
 		if !d.IsDir() {
 			continue
 		}
-		// 0.7.0：家目录内嵌回收站不进分配选择器（管理端口同样不可入 jail 基座）
+		// 家目录内嵌回收站不进分配选择器（管理端口同样不可入 jail 基座）
 		if rootID == store.HomeRootID && d.Name() == fileops.HomeTrashName {
 			continue
 		}
@@ -468,7 +476,7 @@ func (s *Server) handleAdminDeleteGroup(c *gin.Context) {
 
 // ---------- ACL / 分享链接总览（管理台用） ----------
 
-// handleAdminListAudits GET /api/v1/admin/audits?limit=&userId=（0.5.1 审计日志）。
+// handleAdminListAudits GET /api/v1/admin/audits?limit=&userId=（审计日志）。
 func (s *Server) handleAdminListAudits(c *gin.Context) {
 	limit := 200
 	if v, err := strconv.Atoi(c.Request.URL.Query().Get("limit")); err == nil && v > 0 {

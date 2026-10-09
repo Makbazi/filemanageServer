@@ -11,10 +11,11 @@ import (
 // CurrentSchema 当前配置 schema 版本。
 // 每次配置结构发生不兼容变化时 +1，并在下方追加对应迁移函数（需求25：
 // 服务端安全升级——旧配置文件自动迁移、原文件备份、未知字段保留）。
-const CurrentSchema = 8
+const CurrentSchema = 9
 
-// MigrateMap 对通用 map 形式的配置执行迁移链，返回是否发生变化。
-// 缺失 schemaVersion 的旧配置视为 v1。
+// MigrateMap 对通用 map 形式的配置执行迁移链 v1→…→v8→v9，返回是否发生变化。
+// 缺失 schemaVersion 的旧配置视为 v1（v1–v7 为基线前内部迭代、从未发布；
+// v8 自 0.1.0 起、v9 自 0.2.3 起）。
 func MigrateMap(m map[string]any) (bool, error) {
 	ver := 1
 	if v, ok := m["schemaVersion"].(float64); ok && v > 0 {
@@ -47,6 +48,9 @@ func MigrateMap(m map[string]any) (bool, error) {
 		case 7:
 			changed = migrate7to8(m) || changed
 			ver = 8
+		case 8:
+			changed = migrate8to9(m) || changed
+			ver = 9
 		default:
 			return changed, fmt.Errorf("no migration path from schemaVersion %d", ver)
 		}
@@ -58,7 +62,7 @@ func MigrateMap(m map[string]any) (bool, error) {
 	return changed, nil
 }
 
-// migrate1to2 v1（0.1.x 平铺配置）→ v2（0.2.0）：
+// migrate1to2 v1（平铺配置）→ v2：
 // 只补齐新增键的默认值，绝不覆盖/删除已有配置项。
 func migrate1to2(m map[string]any) bool {
 	changed := false
@@ -83,9 +87,9 @@ func migrate1to2(m map[string]any) bool {
 	return changed
 }
 
-// migrate2to3 v2（0.2.x）→ v3（0.3.0）：
+// migrate2to3 v2→v3：
 //  1. db.driver json|memory → sqlite3（json/memory 驱动已随 filemanageDb 并入而移除，
-//     0.2.x 的 meta.json 元数据不再读取——破坏性变更见 CHANGELOG）；
+//     其 meta.json 元数据不再读取——破坏性变更见 CHANGELOG）；
 //     *.json 的 dsn 改写为同目录同名 .db；自定义 sqlite 路径保持不变。
 //  2. 新增 cache（redis）配置段，默认关闭。
 //     注意：本迁移只改写"值为 json/memory"的配置，绝不覆盖用户已有的 sqlite/mysql 配置。
@@ -115,7 +119,7 @@ func migrate2to3(m map[string]any) bool {
 	return changed
 }
 
-// migrate3to4 v3（0.3.x）→ v4（0.3.1）：新增 maxUploadBytes
+// migrate3to4 v3→v4：新增 maxUploadBytes
 // （单次上传大小硬上限，字节，0=不限）。只补默认键，绝不覆盖已有值（需求25）。
 func migrate3to4(m map[string]any) bool {
 	if _, ok := m["maxUploadBytes"]; !ok {
@@ -125,7 +129,7 @@ func migrate3to4(m map[string]any) bool {
 	return false
 }
 
-// migrate4to5 v4（0.3.1）→ v5（0.5.0）：新增 adminListen（管理面独立端口，
+// migrate4to5 v4→v5：新增 adminListen（管理面独立端口，
 // 管理台与 admin API 从用户端口迁出）。只补默认键，绝不覆盖已有值（需求25）。
 func migrate4to5(m map[string]any) bool {
 	if _, ok := m["adminListen"]; !ok {
@@ -135,7 +139,7 @@ func migrate4to5(m map[string]any) bool {
 	return false
 }
 
-// migrate5to6 v5（0.5.0）→ v6（0.5.1）：rateLimit 补 qps 键、顶层补 corsAllowOrigins。
+// migrate5to6 v5→v6：rateLimit 补 qps 键、顶层补 corsAllowOrigins。
 // 只补缺省，绝不覆盖已有值（需求25）。
 func migrate5to6(m map[string]any) bool {
 	changed := false
@@ -155,7 +159,7 @@ func migrate5to6(m map[string]any) bool {
 	return changed
 }
 
-// migrate6to7 v6（0.5.1/0.6.x）→ v7（0.7.0）：新增 dataDir（运行数据根目录，
+// migrate6to7 v6→v7：新增 dataDir（运行数据根目录，
 // 派生 trash/staging/versions/secret/sqlite 默认路径与 <dataDir>/Users 用户主目录）。
 // 只补默认键（需求25）：v6 配置本就带 trashDir/uploadStagingDir/secretFile/
 // versions.dir 显式值（v1-v6 迁移链所种），这些显式值原样保留、优先于派生，
@@ -168,8 +172,8 @@ func migrate6to7(m map[string]any) bool {
 	return false
 }
 
-// migrate7to8 v7（0.7.x）→ v8（0.1.0）：新增 adminAccess（需求38 管理界面 IP 准入）。
-// 存量配置补 {"mode":"lan"}：与 0.7.x 管理端口沿用 lanOnly=true（默认）时的
+// migrate7to8 v7→v8（0.1.0）：新增 adminAccess（需求38 管理界面 IP 准入）。
+// 存量配置补 {"mode":"lan"}：与旧配置管理端口沿用 lanOnly=true（默认）时的
 // 判定语义逐字等价（回环+私网+link-local 放行），升级零行为变化（需求25）。
 // 新装配置不经过本函数，直接吃 DefaultConfig 的 "local"（仅本机，更安全）。
 func migrate7to8(m map[string]any) bool {
@@ -180,7 +184,20 @@ func migrate7to8(m map[string]any) bool {
 	return false
 }
 
-// LoadBalancerConfig 加载 balancer 模式配置：不要求 roots，不生成 JWT 密钥。
+// migrate8to9 v8（0.1.0–0.2.2）→ v9（0.2.3）：新增 auth 段（三层认证图容量与
+// 节奏，替代 JWT 认证）。只补缺不覆盖；jwtSecret/secretFile 字段原样保留
+// （认证已不使用，仅为存量配置加载兼容，不删键——删键属破坏性配置变更）。
+func migrate8to9(m map[string]any) bool {
+	if _, ok := m["auth"]; !ok {
+		m["auth"] = map[string]any{"memMaxEntries": 200000, "memTTL": "5m",
+			"redisMaxEntries": 5000000, "sweepInterval": "10m", "touchWriteEvery": "10m"}
+		return true
+	}
+	return false
+}
+
+// LoadBalancerConfig 加载 balancer 模式配置：不要求 roots，不物化 secret 文件
+// （0.2.3 起认证凭证由 worker 侧认证图签发，balancer 纯转发、零认证参与）。
 func LoadBalancerConfig(path string) (*Config, error) {
 	c := DefaultConfig()
 	if path != "" {

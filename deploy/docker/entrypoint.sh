@@ -70,22 +70,23 @@ trap shutdown EXIT
 
 # ---------- 为每个节点生成配置并创建数据目录 ----------
 # 默认策略：每节点使用完全独立的目录（node$i/{files,trash,staging,versions} 与
-# 独立的 meta.db、jwt.secret），满足"多实例互不干扰"的部署要求（需求26）。
+# 独立的 meta.db），满足"多实例互不干扰"的部署要求（需求26）。
 #
 # —— 共享数据模式（可选，注释示例）——
 # 若希望多实例共享同一份数据组成集群，应让各节点配置指向相同的：
-#   db.dsn、roots[].path、trashDir、uploadStagingDir、secretFile
+#   db.dsn、roots[].path、trashDir、uploadStagingDir（及 dataDir，见下）
 # 例如把下面 heredoc 中所有 "$node_dir/..." 统一替换为共享目录 "$FM_DATA_DIR/shared/..."：
 #   "db":               {"driver": "sqlite", "dsn": "/data/shared/meta.db"},
 #   "roots":            [{"id": "main", "name": "主目录", "path": "/data/shared/files"}],
 #   "trashDir":         "/data/shared/trash",
 #   "uploadStagingDir": "/data/shared/staging",
-#   "secretFile":       "/data/shared/jwt.secret"
-# 0.7.0 注意：用户家目录固定位于 <dataDir>/Users/<用户名>（用户文件与其回收站
+# 注意：用户家目录固定位于 <dataDir>/Users/<用户名>（用户文件与其回收站
 # 实体都在其中）——多实例共享部署时须将 dataDir 一并指向共享卷
 # （如 "dataDir": "/data/shared"），否则用户文件跨实例不可见。
-# 注意：共享 sqlite 时各节点并发写同一 db 文件，建议数据目录放在本地盘（非网络盘），
-# 且所有节点必须共用同一个 secretFile，否则 JWT 无法互认。
+# 注意：共享 sqlite 时各节点并发写同一 db 文件，建议数据目录放在本地盘（非网络盘）。
+# 认证自 0.2.3 起为服务端三层认证图（不透明随机凭证，L3=共享库 auth_sessions 表）：
+# 登录凭证存于共享元数据库，任一节点签发、全节点互认，无需再共享任何密钥文件；
+# 各节点如同时指向 redis（cache.enabled），认证缓存 L2 亦天然共享（可选）。
 for ((i = 0; i < FM_NODES; i++)); do
     port=$(( FM_BASE_PORT + i ))
     admin_port=$(( FM_ADMIN_BASE_PORT + i ))

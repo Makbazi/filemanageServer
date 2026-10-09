@@ -1,6 +1,6 @@
 // dialect.go：sqlite3/mysql/postgresql 三驱动共用单一 sqlStore 实现的方言层。
 //
-// 0.6.0（需求2）：查询/upsert/占位符/主键回填全部交给 gorm（见 sqlstore.go/rows.go），
+// 需求2：查询/upsert/占位符/主键回填全部交给 gorm（见 sqlstore.go/rows.go），
 // 本层只保留三件事：
 //   - 幂等建表 DDL 清单（dialect_*.go，需求25：sqlite 既有 .db 文件字节兼容，只增不改）；
 //   - normalizeDSN：按方言补齐连接参数（sqlite WAL/busy_timeout、mysql parseTime/charset、
@@ -47,7 +47,7 @@ func (d *dialect) normalizeDSN(dsn string) string {
 		if strings.Contains(dsn, "?") {
 			sep = "&"
 		}
-		// gorm mysql 驱动扫描 time.Time 依赖 parseTime（与 0.5.x 同参数）。
+		// gorm mysql 驱动扫描 time.Time 依赖 parseTime。
 		if !strings.Contains(dsn, "parseTime=") {
 			dsn += sep + "parseTime=true"
 			sep = "&"

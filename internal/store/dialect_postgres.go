@@ -85,7 +85,7 @@ func pgDDL() []string {
 			status TEXT NOT NULL DEFAULT 'uploading',
 			created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_upload_active ON upload_sessions(root_id, path, status)`,
-		// ---- v0.5.0 新增表 ----
+		// ---- 新增表 ----
 		`CREATE TABLE IF NOT EXISTS user_roots (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL, root_id TEXT NOT NULL,
@@ -99,16 +99,26 @@ func pgDDL() []string {
 			root_id TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '',
 			detail TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '')`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at)`,
+		// ---- 0.2.3 auth_sessions（三层认证图持久层） ----
+		`CREATE TABLE IF NOT EXISTS auth_sessions (
+			id BIGSERIAL PRIMARY KEY,
+			kind TEXT NOT NULL DEFAULT 'user', user_id BIGINT NOT NULL,
+			username TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '',
+			super INTEGER NOT NULL DEFAULT 0, gen BIGINT NOT NULL DEFAULT 0,
+			ref TEXT NOT NULL DEFAULT '', token_hash TEXT NOT NULL UNIQUE,
+			expires_at TIMESTAMP NOT NULL, last_used_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS idx_authsess_exp ON auth_sessions(expires_at)`,
 	}
 }
 
-// pgSeqReset 跨库复制后的 BIGSERIAL 序列对齐（仅 0.7.0 copy.go 使用）：
+// pgSeqReset 跨库复制后的 BIGSERIAL 序列对齐（仅 copy.go 使用）：
 // 显式主键插入不推进序列，不重置则切换后首个 INSERT 撞唯一键。
 // setval(seq, max+1, false) 使下一个 nextval 恰为 max+1；空表落到 1。
 func pgSeqReset() []string {
 	intTables := []string{"users", "user_roots", "file_metas", "ai_descriptions",
 		"trash_items", "groups", "folder_acls", "share_links", "file_versions",
-		"sessions", "audit_events"}
+		"sessions", "audit_events", "auth_sessions"}
 	out := make([]string, 0, len(intTables))
 	for _, t := range intTables {
 		out = append(out, fmt.Sprintf(

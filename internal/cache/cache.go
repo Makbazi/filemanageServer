@@ -1,4 +1,4 @@
-// Package cache 提供可选的 redis 元数据缓存（0.3.0，非必须组件）。
+// Package cache 提供可选的 redis 元数据缓存（非必须组件）。
 //
 // 接入方式：main.go 以 Wrap(store, Cache) 装饰 internal/store.Store —— 读穿透 +
 // 写失效集中在装饰器一处，全部 handler/perm/transfer 零改动。
@@ -43,7 +43,7 @@ type Cache interface {
 	PutGroups(gs []*store.Group) error
 	DropGroups() error
 
-	// FlushAll 清空本缓存的全部 fm:* 键（0.7.0 数据库热切换后调用：
+	// FlushAll 清空本缓存的全部 fm:* 键（数据库热切换后调用：
 	// 新旧库的用户 ID/ACL 可能互相冲突，残留缓存会遮蔽新库数据）。
 	FlushAll() error
 }

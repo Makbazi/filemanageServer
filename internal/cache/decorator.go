@@ -14,7 +14,7 @@ type cached struct {
 	c Cache
 }
 
-// Degraded 实现 store 侧 availability 透传（0.7.0）：装饰链的降级状态
+// Degraded 实现 store 侧 availability 透传：装饰链的降级状态
 // 跟随底层（Proxy），供 requireDB/store.Degraded 统一判定。
 func (s *cached) Degraded() bool { return store.Degraded(s.Store) }
 

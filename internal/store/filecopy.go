@@ -1,5 +1,5 @@
 // filecopy.go：文件存储的全表迁移通道（0.1.1，实现 copy.go 的 rowSource/rowSink）。
-// file→db（迁移）与 db→file（导出/切换携带）共用；载体同为 rows.go 的 13 个行模型，
+// file→db（迁移）与 db→file（导出/切换携带）共用；载体同为 rows.go 的 14 个行模型，
 // 主键原样保留，目标端 nextID 抬升到 max(已见 PK)+1（id 永不复用）。
 package store
 
@@ -9,7 +9,7 @@ import (
 	"sort"
 )
 
-// tableOrdinal 表名 → 帧内表序（1..13，与 tableNames/copy.go 对齐）。
+// tableOrdinal 表名 → 帧内表序（1..14，与 tableNames/copy.go 对齐）。
 func tableOrdinal(name string) (byte, error) {
 	for i, t := range tableNames {
 		if t == name {
@@ -92,6 +92,8 @@ func (f *fileStore) copyScan(table string, fn func(batch any) error) error {
 		return batched(sortedValsStr(mvs), func(b []metaKVRow) error { return fn(b) })
 	case "audit_events":
 		return batched(sortedValsInt(f.idx.audits), func(b []auditRow) error { return fn(b) })
+	case "auth_sessions":
+		return batched(sortedValsInt(f.idx.authSessions), func(b []authSessionRow) error { return fn(b) })
 	}
 	return fmt.Errorf("copy: unknown table %q", table)
 }
@@ -209,6 +211,12 @@ func copyEach(batch any, fn func(any) error) error {
 			}
 		}
 	case []auditRow:
+		for i := range b {
+			if err := fn(b[i]); err != nil {
+				return err
+			}
+		}
+	case []authSessionRow:
 		for i := range b {
 			if err := fn(b[i]); err != nil {
 				return err

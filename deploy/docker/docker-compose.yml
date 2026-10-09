@@ -2,7 +2,7 @@
 # docker-compose.yml —— filemanage-server 三种基础镜像的多容器编排示例（需求27/28）
 #
 # 位置：filemanageServer/deploy/docker/docker-compose.yml
-# 构建上下文为仓库根（../../.. 即 filemanage/）；0.3.0 起服务端自含元数据层，无同级模块依赖。
+# 构建上下文为仓库根（../../.. 即 filemanage/）；服务端自含元数据层，无同级模块依赖。
 #
 # ---------------------------------------------------------------------------
 # 一、"同一容器里运行几个节点"——NODES_PER_CONTAINER
