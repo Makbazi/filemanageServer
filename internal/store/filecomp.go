@@ -174,6 +174,10 @@ func (f *fileStore) writeSnapshotLocked(tmpPath, finalName string) error {
 		fl.Close()
 		return err
 	}
+	if err = eachSorted(f.idx.authSessions, func(r authSessionRow) error { return write(tAuthSessions, r) }); err != nil {
+		fl.Close()
+		return err
+	}
 	if err = w.Flush(); err != nil {
 		fl.Close()
 		return err

@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"filemanageServer/internal/ai"
+	"filemanageServer/internal/auth"
 	"filemanageServer/internal/cache"
 	"filemanageServer/internal/config"
 	"filemanageServer/internal/fileops"
@@ -29,7 +30,7 @@ import (
 // 分片上传管理器、版本库、路径锁。
 type Server struct {
 	Cfg      *config.Config
-	Store    store.Store // 0.7.0：恒为 store.Proxy（或其 cache 装饰器），支持运行期热切换
+	Store    store.Store // 恒为 store.Proxy（或其 cache 装饰器），支持运行期热切换
 	AI       ai.Provider
 	Roots    map[string]*config.RootCfg
 	Perms    *perm.Engine
@@ -38,7 +39,7 @@ type Server struct {
 	Locks    *transfer.LockRegistry
 	guard    *bruteGuard // 分享链接密码防爆破
 
-	// 0.7.0 管理台配库（v1_dbconfig.go）
+	// 管理台配库（v1_dbconfig.go）
 	DBProxy  *store.Proxy // 裸代理（未装饰），connect 换入新库用；状态/表统计也走它
 	Cache    cache.Cache  // 可为 nil（未启用 redis）；切换后 FlushAll
 	CfgPath  string       // 配置文件路径（PersistDBEdit 回写；空=内存配置，不回写）
@@ -46,6 +47,9 @@ type Server struct {
 
 	// Super 超级管理员账户（0.1.0 需求32：文件承载、不进数据库、无库降级模式同样可用）
 	Super *superadmin.Store
+
+	// Auth 三层认证中心（0.2.3，替代 JWT）：不透明随机凭证，身份存服务端认证图。
+	Auth *auth.Center
 
 	// 0.1.1 维护暂停（需求：切换/迁移/导出前后数据一致性）：
 	// manualPause = 管理台"暂停客户端"开关；autoPause = connect(含迁移)/export
@@ -58,10 +62,10 @@ type Server struct {
 }
 
 // NewServer 构造 Server 并初始化各子模块。
-// 0.7.0：st 传入 store.Proxy（或其 cache 装饰器）——热切换数据库对
+// st 传入 store.Proxy（或其 cache 装饰器）——热切换数据库对
 // 全部消费方透明，无需重建 Server；proxy 为 st 之下的裸代理。
 // 0.1.0：super 为文件承载超管账户（需求32；nil 时超管路径整体关闭，仅测试构造用）。
-func NewServer(cfg *config.Config, st store.Store, proxy *store.Proxy, cch cache.Cache, cfgPath string, super *superadmin.Store) (*Server, error) {
+func NewServer(cfg *config.Config, st store.Store, proxy *store.Proxy, cch cache.Cache, cfgPath string, super *superadmin.Store, center *auth.Center) (*Server, error) {
 	locks := transfer.NewLockRegistry()
 	uploads, err := transfer.NewManager(st, cfg.UploadStagingDir, locks)
 	if err != nil {
@@ -84,12 +88,13 @@ func NewServer(cfg *config.Config, st store.Store, proxy *store.Proxy, cch cache
 		Cache:     cch,
 		CfgPath:   cfgPath,
 		Super:     super,
+		Auth:      center,
 		startedAt: time.Now(),
 	}
 	for i := range cfg.Roots {
 		s.Roots[cfg.Roots[i].ID] = &cfg.Roots[i]
 	}
-	// 0.7.0 需求3：内部合成根 <dataDir>/Users（用户家目录），只进内存 Roots 映射、
+	// 需求3：内部合成根 <dataDir>/Users（用户家目录），只进内存 Roots 映射、
 	// 不进配置文件 roots（config 已禁止 "_" 前缀用户根 id）；无库时 computeBases
 	// 不暴露它，有库时用户经自动分配 (_users,<用户名>) jail 到家目录。
 	s.Roots[store.HomeRootID] = &config.RootCfg{
@@ -127,7 +132,7 @@ func isSuperAdmin(c *gin.Context) bool {
 	return u != nil && u.ID == store.SuperAdminID
 }
 
-// resolve 把 (rootID, relPath) 映射到磁盘绝对路径。0.5.0 起为 scope 的薄封装：
+// resolve 把 (rootID, relPath) 映射到磁盘绝对路径，是 scope 的薄封装：
 // 除 chroot 防逃逸外，还校验请求路径命中主体的授权基座（分配/分享/公开，见 scope.go）。
 func (s *Server) resolve(c *gin.Context, rootID, rel string) (*config.RootCfg, string, error) {
 	sc, err := s.scope(c, rootID, rel)
@@ -149,7 +154,7 @@ func (s *Server) permsFor(c *gin.Context, rootID, rel string) perm.Decision {
 }
 
 // permsBatch 返回当前主体在 rootID 内按显示路径逐条目判定的闭包（ACL 只取一次）。
-// 目录列表/搜索等按条目过滤权限的场景使用，避免 N+1 查询（0.3.1/0.5.0）。
+// 目录列表/搜索等按条目过滤权限的场景使用，避免 N+1 查询。
 func (s *Server) permsBatch(c *gin.Context, rootID string) (func(disp string) perm.Decision, error) {
 	sc, err := s.scope(c, rootID, "")
 	if err != nil {
@@ -169,7 +174,7 @@ func (s *Server) requireLoginUser(c *gin.Context) *store.User {
 	return u
 }
 
-// dbReady 报告元数据库是否可用（0.7.0：经 store.Proxy 动态判定，
+// dbReady 报告元数据库是否可用（经 store.Proxy 动态判定，
 // 管理台热切换后自动跟随；替代旧 `Store == nil` 启动期判定）。
 func (s *Server) dbReady() bool { return !store.Degraded(s.Store) }
 
@@ -190,7 +195,7 @@ func (s *Server) withAutoPause(fn func() error) error {
 	return fn()
 }
 
-// audit 写审计日志（0.5.1：登录/账户/权限/删除/分享等关键事件）。
+// audit 写审计日志（登录/账户/权限/删除/分享等关键事件）。
 // 降级模式（无库）静默跳过；任何写入失败只记日志，绝不影响主流程。
 // path 传显示路径即可，内部经 scope 换算物理键；换算失败时按原样记录。
 func (s *Server) audit(c *gin.Context, action, username string, userID int64, rootID, path, detail string) {
@@ -231,7 +236,7 @@ func (s *Server) requirePerm(c *gin.Context, rootID, rel string, need func(perm.
 }
 
 // requirePermPhys 同 requirePerm，但键是存储层物理键 (rootID, physPath)——
-// 供版本/回收站等"库内记录回流入 API"的路径使用（0.6.0：jailed 用户不再被误判越权）。
+// 供版本/回收站等"库内记录回流入 API"的路径使用（jailed 用户不再被误判越权）。
 func (s *Server) requirePermPhys(c *gin.Context, physRoot, physPath string, need func(perm.Decision) bool, what string) bool {
 	if s.requireLoginUser(c) == nil {
 		return false
@@ -248,10 +253,10 @@ func (s *Server) requirePermPhys(c *gin.Context, physRoot, physPath string, need
 	return true
 }
 
-// degradedView 匿名只读端点的统一权限闸门（0.3.0）：
+// degradedView 匿名只读端点的统一权限闸门：
 // 配置了元数据库时行为与 0.2.x 完全一致（requirePerm，匿名 401）；
 // 降级模式（无库）下跳过登录要求，按 perm 引擎的匿名决策放行。
-// 0.5.0 收紧（D1 决策）：降级模式匿名仅可浏览（元数据视图），下载/预览一律 403。
+// 已收紧（D1 决策）：降级模式匿名仅可浏览（元数据视图），下载/预览一律 403。
 func (s *Server) degradedView(c *gin.Context, rootID, rel string, need func(perm.Decision) bool, what string) bool {
 	if s.dbReady() {
 		return s.requirePerm(c, rootID, rel, need, what)
@@ -286,7 +291,7 @@ func sortEntries(entries []FileEntry) {
 }
 
 // recordMeta 把文件元数据（归属、日期等）记入 Store，供 AI 描述关联。
-// 存储键统一用物理根 + 物理路径（0.5.0，见 scope.go）。
+// 存储键统一用物理根 + 物理路径（见 scope.go）。
 // e.Hash 非空（上传/整传/回滚等真正写入字节的调用方现算）时携带 content_hash；
 // 为例行刷行（handleList）所留空时，Store 侧按 size/mtime 保留旧哈希（0.2.1），
 // 供 POST /check 重复上传校验做廉价比对。

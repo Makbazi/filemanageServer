@@ -23,12 +23,13 @@ import (
 
 // 临时分享链接（需求7）：有效期自定义、密码默认随机生成、可管理（改密码/改有效期/免密/禁用/删除）。
 // 匿名访问流程：GET /s/{token} 查看信息 → 有密码则 POST /s/{token}/verify 换取
-// 短期 shareToken（JWT，2h）→ 携带 ?st= 或 Bearer 访问 files/download。
+// 短期 shareToken（0.2.3：认证图随机凭证 kind=share、绝对 2h、Ref 绑定链接 token）
+// → 携带 ?st= 或 Bearer 访问 files/download。
 
 const shareTokenTTL = 2 * time.Hour
 
 // linkView 链接对外视图（永不含密码哈希）。
-// 0.6.0（需求14）：不再输出物理 rootId/path——分享访问者（含登录用户）只能通过链接
+// 需求14：不再输出物理 rootId/path——分享访问者（含登录用户）只能通过链接
 // 本身访问，不得知悉文件的物理位置。管理端口需要物理键时用 linkViewFull。
 func linkView(l *store.ShareLink) map[string]any {
 	return map[string]any{
@@ -104,7 +105,7 @@ func (s *Server) handleShareCreate(c *gin.Context) {
 	case req.Password != "":
 		plain = req.Password
 	default:
-		_ = req.AutoPassword // 默认即自动生成（0.5.0：六位字母+数字）
+		_ = req.AutoPassword // 默认即自动生成（六位字母+数字）
 		plain, err = auth.RandomPassword(6)
 		if err != nil {
 			writeErr(c, http.StatusInternalServerError, err)
@@ -117,7 +118,7 @@ func (s *Server) handleShareCreate(c *gin.Context) {
 			return
 		}
 	}
-	// 链接按物理键存储（0.5.0）：匿名 /s/ 访问与管理台直查物理根，不依赖创建者会话
+	// 链接按物理键存储：匿名 /s/ 访问与管理台直查物理根，不依赖创建者会话
 	link := &store.ShareLink{
 		Token: fileops.RandomHex(12), RootID: sc.PhysID, Path: sc.Phys,
 		IsDir: info.IsDir(), PasswordHash: hash, ExpiresAt: expires, CreatedBy: u.ID,
@@ -143,7 +144,7 @@ func (s *Server) handleShareList(c *gin.Context) {
 	out := make([]map[string]any, 0, len(links))
 	for _, l := range links {
 		v := linkView(l)
-		if rid, disp, ok := s.displayOf(c, l.RootID, l.Path); ok { // 显示键换算（0.5.0）
+		if rid, disp, ok := s.displayOf(c, l.RootID, l.Path); ok { // 显示键换算
 			v["rootId"], v["path"] = rid, disp
 		}
 		out = append(out, v)
@@ -240,7 +241,7 @@ func (s *Server) handleShareDelete(c *gin.Context) {
 // ---------- 匿名访问 ----------
 
 // validLink 校验链接有效性（存在/未禁用/未过期/目标根在/创建者仍具 Share 权限）。
-// 0.5.0：创建者的 Share 权限被回收（ACL 收紧/分配解除/用户删除）后链接立即失效。
+// 创建者的 Share 权限被回收（ACL 收紧/分配解除/用户删除）后链接立即失效。
 func (s *Server) validLink(c *gin.Context, token string) *store.ShareLink {
 	link, err := s.Store.GetShareLinkByToken(token)
 	if err != nil {
@@ -288,7 +289,10 @@ func (s *Server) shareUnlocked(c *gin.Context, link *store.ShareLink) bool {
 	if st == "" {
 		return false
 	}
-	return auth.ParseShareToken(s.Cfg.JWTSecret, st, link.Token) == nil
+	// 0.2.3：shareToken 为认证图中的随机凭证（kind=share，绝对 2h，Ref 绑定链接
+	// token——同一凭证换链接即失效）；非 share 条目/登录凭证走这里一律 false。
+	e, err := s.Auth.Lookup(c.Request.Context(), st)
+	return err == nil && e.Kind == store.AuthKindShare && e.Ref == link.Token
 }
 
 func clientIP(c *gin.Context) string {
@@ -324,7 +328,7 @@ func (s *Server) handleShareVerify(c *gin.Context) {
 		return
 	}
 	if !link.HasPassword {
-		st, err := auth.IssueShareToken(s.Cfg.JWTSecret, token, shareTokenTTL)
+		st, err := s.issueShareToken(c, token)
 		if err != nil {
 			writeErr(c, http.StatusInternalServerError, err)
 			return
@@ -345,12 +349,22 @@ func (s *Server) handleShareVerify(c *gin.Context) {
 		return
 	}
 	s.guard.Reset(token, ip)
-	st, err := auth.IssueShareToken(s.Cfg.JWTSecret, token, shareTokenTTL)
+	st, err := s.issueShareToken(c, token)
 	if err != nil {
 		writeErr(c, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(c, http.StatusOK, map[string]any{"shareToken": st})
+}
+
+// issueShareToken 签发分享解锁凭证（0.2.3 去 JWT：认证图 kind=share 条目，
+// 随机凭证 + Ref 绑定链接 token；绝对 2h，无滑动）。异常路径无存储时退为
+// 内存条目（本实例有效、重启失效——访客重输口令即恢复，语义不劣于旧降级）。
+func (s *Server) issueShareToken(c *gin.Context, linkToken string) (string, error) {
+	return s.Auth.Issue(c.Request.Context(), auth.Spec{
+		Kind: store.AuthKindShare, UserID: store.AuthShareUserID, Ref: linkToken,
+		TTL: shareTokenTTL, Persist: s.dbReady(),
+	})
 }
 
 // linkScope 返回链接目标的根配置与磁盘绝对路径。
@@ -376,7 +390,7 @@ func subAbs(scopeAbs, sub string) (string, string, error) {
 	if abs != scopeAbs && !strings.HasPrefix(abs, scopeAbs+string(filepath.Separator)) {
 		return "", "", errors.New("path escapes share scope")
 	}
-	if err := fileops.EnsureNoEscape(scopeAbs, abs); err != nil { // 0.5.1 符号链接加固
+	if err := fileops.EnsureNoEscape(scopeAbs, abs); err != nil { // 符号链接加固
 		return "", "", err
 	}
 	return abs, sub, nil
@@ -405,7 +419,7 @@ func (s *Server) handleShareFiles(c *gin.Context) {
 		}
 		e := FileEntry{Name: info.Name(), Path: "", IsDir: false,
 			Size: info.Size(), Mtime: info.ModTime(), Kind: fileops.KindOf(info.Name(), false)}
-		// 0.6.0（需求14）：不输出物理 rootId——访问者只能在链接目录内活动。
+		// 需求14：不输出物理 rootId——访问者只能在链接目录内活动。
 		writeJSON(c, http.StatusOK, map[string]any{"path": "", "entries": []FileEntry{e}, "scope": filepath.Base(link.Path)})
 		return
 	}

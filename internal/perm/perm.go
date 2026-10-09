@@ -3,7 +3,7 @@
 //   - 登录用户默认全权限，除非路径链上存在与其（用户/所属用户组）匹配的 ACL；
 //   - 匿名访客默认只读浏览（anonymous.enabled 控制），下载/上传/删除/分享一律拒绝，
 //     目录可通过 public 主体 ACL 显式放开或收紧"查看"；
-//   - 0.6.0：public 条目同样匹配登录主体（仅查看——公开目录对他用户可见不可写）；
+//   - public 条目同样匹配登录主体（仅查看——公开目录对他用户可见不可写）；
 //     主体自己的分配目录（user_roots）短路全权，不受任何 ACL 条目影响；
 //   - ACL 继承：取离目标路径最近的、含匹配主体的祖先目录配置，命中即止（OR 合并同层多条）。
 package perm
@@ -46,10 +46,10 @@ func (e *Engine) For(u *store.User, rootID, relPath string) Decision {
 }
 
 // BatchFor 返回一个对同 root 内多条路径批量判定的闭包：ACL 与组归属只取一次，
-// 供目录列表/搜索逐条目过滤权限使用（避免每条目重复查询造成 N+1，0.3.1）。
+// 供目录列表/搜索逐条目过滤权限使用（避免每条目重复查询造成 N+1）。
 func (e *Engine) BatchFor(u *store.User, rootID string) func(relPath string) Decision {
 	if !store.Degraded(e.Store) && u != nil {
-		// 0.6.0（需求13）：登录主体对"自己被授予的分配目录"（user_roots）天然全权，
+		// 需求13：登录主体对"自己被授予的分配目录"（user_roots）天然全权，
 		// 不查 ACL——否则他人在自己目录上设置的 public 条目会把属主降级为仅查看。
 		if own := e.ownSubs(rootID, u.ID); len(own) > 0 {
 			inner := e.batchForLocked(u, rootID)
@@ -68,8 +68,8 @@ func (e *Engine) BatchFor(u *store.User, rootID string) func(relPath string) Dec
 func (e *Engine) batchForLocked(u *store.User, rootID string) func(relPath string) Decision {
 	if store.Degraded(e.Store) {
 		// 降级模式（无元数据库）：无用户体系，匿名按配置放开只读浏览，
-		// 下载/上传/修改/删除一律禁止（0.5.0 D1 收紧：与有库模式同语义，
-		// 修复 0.3.x"匿名可下载"与需求6 的冲突）。登录端点已被 requireDB 拦为 503。
+		// 下载/上传/修改/删除一律禁止（D1 收紧：与有库模式同语义，
+		// 修复了"匿名可下载"与需求6 的冲突）。登录端点已被 requireDB 拦为 503。
 		d := DenyAll()
 		if e.AnonymousEnabled {
 			d = ViewOnly()
@@ -137,7 +137,7 @@ func (e *Engine) decide(u *store.User, entries []*store.FolderACL, groupIDs map[
 			}
 			matched = true
 			merged.View = merged.View || a.Perms.View
-			// 0.6.0：public 条目对登录主体也匹配（需求13 公开目录可见），但只放开"查看"；
+			// public 条目对登录主体也匹配（需求13 公开目录可见），但只放开"查看"；
 			// 下载/上传/删除/分享永不经 public 条目授予（匿名同语义）。
 			if a.SubjectType == store.SubjectPublic {
 				continue
@@ -181,7 +181,7 @@ func (e *Engine) anonDefault() Decision {
 func matchSubject(a *store.FolderACL, u *store.User, groupIDs map[int64]bool) bool {
 	switch a.SubjectType {
 	case store.SubjectPublic:
-		return true // 0.6.0（需求13）：public 条目对登录主体也匹配（仅 View，见 decide）
+		return true // 需求13：public 条目对登录主体也匹配（仅 View，见 decide）
 	case store.SubjectUser:
 		return u != nil && u.ID == a.SubjectID
 	case store.SubjectGroup:

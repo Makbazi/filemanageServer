@@ -622,6 +622,137 @@ func (f *fileStore) DeleteExpiredSessions(now time.Time) error {
 	return nil
 }
 
+// ---------- 认证会话（0.2.3 三层认证图持久层） ----------
+// 语义逐方法对齐 sqlStore（含 fsync 纪律：发放/吊销同步落盘=关键操作，续期
+// RenewAuthSession 与过期清扫走 50ms 批量刷盘——滑动 Touch 绝不逐请求 fsync）。
+
+func (f *fileStore) CreateAuthSession(a *AuthSession) error {
+	now := time.Now()
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = now
+	}
+	if a.LastUsedAt.IsZero() {
+		a.LastUsedAt = now
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return closedErr()
+	}
+	r := authSessionRow{}.fromAuthSession(a)
+	r.ID = f.allocID(tAuthSessions)
+	if err := f.putLocked(tAuthSessions, r); err != nil {
+		return err
+	}
+	a.ID = r.ID
+	return f.syncNowLocked() // 发放须持久（重启恢复/跨实例一致）
+}
+
+func (f *fileStore) GetAuthSessionByTokenHash(tokenHash string) (*AuthSession, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if r, ok := f.idx.authByHash[tokenHash]; ok {
+		return r.to(), nil
+	}
+	return nil, ErrNotFound
+}
+
+func (f *fileStore) RenewAuthSession(id int64, expiresAt, lastUsedAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return closedErr()
+	}
+	r, ok := f.idx.authSessions[id]
+	if !ok {
+		return ErrNotFound // 已被撤权/清扫：调用方（认证中心）据此摘除上层缓存
+	}
+	r.ExpiresAt, r.LastUsedAt = expiresAt, lastUsedAt
+	return f.putLocked(tAuthSessions, *r) // 不 fsync：写后补走批量刷盘
+}
+
+func (f *fileStore) DeleteAuthSessionByTokenHash(tokenHash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return closedErr()
+	}
+	r, ok := f.idx.authByHash[tokenHash]
+	if !ok {
+		return ErrNotFound
+	}
+	if err := f.delLocked(tAuthSessions, r.ID); err != nil {
+		return err
+	}
+	return f.syncNowLocked() // 吊销须持久
+}
+
+func (f *fileStore) DeleteAuthSessionsByUser(userID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return closedErr()
+	}
+	var ids []int64
+	for _, r := range f.idx.authSessions {
+		if r.UserID == userID {
+			ids = append(ids, r.ID)
+		}
+	}
+	for _, id := range ids {
+		if err := f.delLocked(tAuthSessions, id); err != nil {
+			return err
+		}
+	}
+	if len(ids) > 0 {
+		return f.syncNowLocked() // 会话吊销（改密/登出/删号）须持久
+	}
+	return nil
+}
+
+func (f *fileStore) DeleteExpiredAuthSessions(now time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return closedErr()
+	}
+	var ids []int64
+	for _, r := range f.idx.authSessions {
+		if r.ExpiresAt.Before(now) {
+			ids = append(ids, r.ID)
+		}
+	}
+	for _, id := range ids {
+		if err := f.delLocked(tAuthSessions, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ListActiveAuthSessions 未过期条目（token_hash 升序窗口，供认证中心重启预热：
+// 窗口按哈希稳定采样，冷凭证仍经读路径惰性恢复；上限由调用方传入）。
+func (f *fileStore) ListActiveAuthSessions(limit int) ([]*AuthSession, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	now := time.Now()
+	hashes := make([]string, 0, len(f.idx.authByHash))
+	for h, r := range f.idx.authByHash {
+		if !r.ExpiresAt.Before(now) {
+			hashes = append(hashes, h)
+		}
+	}
+	sort.Strings(hashes)
+	if limit > 0 && len(hashes) > limit {
+		hashes = hashes[:limit]
+	}
+	out := make([]*AuthSession, 0, len(hashes))
+	for _, h := range hashes {
+		out = append(out, f.idx.authByHash[h].to())
+	}
+	return out, nil
+}
+
 // ---------- 分片上传会话 ----------
 
 func (f *fileStore) CreateUploadSession(u *UploadSession) error {
@@ -803,4 +934,3 @@ func (f *fileStore) DeleteAuditBefore(before time.Time) error {
 	}
 	return nil
 }
-

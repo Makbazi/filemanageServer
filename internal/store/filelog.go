@@ -12,7 +12,7 @@
 //
 // 记录帧格式（需求：op + length + data + crc）：
 //
-//	op     uint8     0x00+表序 = Put（1..13）；0x10+表序 = Del by PK；0x40 = 清单；0x41 = 自增水位
+//	op     uint8     0x00+表序 = Put（1..14）；0x10+表序 = Del by PK；0x40 = 清单；0x41 = 自增水位
 //	length uint32 LE data 字节数（解码硬上限 16MiB 防畸形）
 //	data   [length]  Put/清单/水位 = JSON；Del = PK（整型表 8 字节 LE，文本主键表原样字符串）
 //	crc    uint32 LE Castagnoli CRC，覆盖 op||length||data
@@ -49,13 +49,13 @@ const (
 	fkSnapshot  = uint32(2)
 	fkManifestK = uint32(3)
 
-	maxFramePayload = 16 << 20          // 单记录上限 16MiB
-	fileHeaderSize  = 4 + 4 + 4         // magic + version + kind
-	frameOverhead   = 1 + 4 + 4         // op + length + crc
-	flushEveryMs    = 50                // 后台刷盘周期（页缓存）
-	segRollBytes    = int64(8 << 20)    // 段滚动阈值
-	compactAppends  = int64(100_000)    // 快照以来追加数阈值
-	compactTombMin  = int64(10_000)     // 墓碑数下限（配合 墓碑>活行/4 触发压缩）
+	maxFramePayload = 16 << 20       // 单记录上限 16MiB
+	fileHeaderSize  = 4 + 4 + 4      // magic + version + kind
+	frameOverhead   = 1 + 4 + 4      // op + length + crc
+	flushEveryMs    = 50             // 后台刷盘周期（页缓存）
+	segRollBytes    = int64(8 << 20) // 段滚动阈值
+	compactAppends  = int64(100_000) // 快照以来追加数阈值
+	compactTombMin  = int64(10_000)  // 墓碑数下限（配合 墓碑>活行/4 触发压缩）
 )
 
 // 记录操作码。表序 1..13 与 copy.go tableNames 顺序一致。
@@ -64,10 +64,11 @@ const (
 	opMaxID    = byte(0x41)
 )
 
-func opPut(table byte) byte { return table }      // table ∈ 1..13
+func opPut(table byte) byte { return table } // table ∈ 1..14
 func opDel(table byte) byte { return 0x10 + table }
 
-// 表序号常量（与 tableNames 对齐）。
+// 表序号常量（与 tableNames 对齐；0.2.3 起 tAuthSessions=14，旧帧 1..13 语义不变，
+// maxid 水位数组短 JSON 补零兼容）。
 const (
 	tUsers = iota + 1
 	tUserRoots
@@ -82,7 +83,8 @@ const (
 	tUploadSessions
 	tServerMeta
 	tAuditEvents
-	tCount = tAuditEvents
+	tAuthSessions
+	tCount = tAuthSessions
 )
 
 var crcCastagnoli = crc32.MakeTable(crc32.Castagnoli)
@@ -96,7 +98,7 @@ var (
 type fsManifest struct {
 	Snapshot string   `json:"snapshot"`
 	Segments []string `json:"segments"`
-	Seq      uint64   `json:"seq"`   // 下一个可用文件编号
+	Seq      uint64   `json:"seq"` // 下一个可用文件编号
 	Closed   bool     `json:"closed,omitempty"`
 }
 

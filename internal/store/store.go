@@ -1,7 +1,7 @@
-// Package store 提供统一的元数据存储抽象（0.3.0 起由独立工程 filemanageDb 并入）。
+// Package store 提供统一的元数据存储抽象（由独立工程 filemanageDb 并入）。
 // 上层只依赖 Store 接口与模型类型，禁止绕过接口直接操作数据库。
 //
-// 0.3.0 变更：json/memory 驱动移除；改为 SQL 三驱动 sqlite3|mysql|postgresql，
+// json/memory 驱动已移除；改为 SQL 三驱动 sqlite3|mysql|postgresql，
 // 单一 sqlStore 实现 + 方言层（dialect.go）。
 //
 // 0.1.1 变更：新增 "file" 驱动（filestore.go 等）——未配置数据库时的**默认**元数据
@@ -31,7 +31,7 @@ const (
 	DriverFile   = "file" // 0.1.1：无数据库默认（DSN=存储目录）
 )
 
-// 用户主目录内部合成根（0.7.0 需求3）：路径 <dataDir>/Users 由配置派生，
+// 用户主目录内部合成根（需求3）：路径 <dataDir>/Users 由配置派生，
 // 不写入配置文件 roots；id 以 '_' 开头（config 校验已禁止用户配置 '_' 前缀 id，
 // 且 ':' 为虚拟根分隔符，天然无冲突）。用户创建时自动分配 (_users, <用户名>)，
 // 即 jail 到 <dataDir>/Users/<用户名>；回收站内嵌于家目录 .fmtrash。
@@ -54,12 +54,12 @@ type Store interface {
 	GetUserByID(id int64) (*User, error)
 	ListUsers() ([]*User, error)
 	UpdateUserPassword(id int64, hash string) error
-	UpdateUserRoots(id int64, roots []string) error // 旧 0.3.x 字段；0.5.0 起仅作迁移输入
+	UpdateUserRoots(id int64, roots []string) error // 旧字段；仅作迁移输入
 	UpdateUserRole(id int64, role string) error
 	DeleteUser(id int64) error
 	CountUsers() (int64, error)
 
-	// 用户根分配（0.5.0 jail 模型，见 UserRoot 注释）
+	// 用户根分配（jail 模型，见 UserRoot 注释）
 	ListUserRoots(userID int64) ([]*UserRoot, error)
 	SetUserRoots(userID int64, list []*UserRoot) error // 全量替换（事务内先删后插）
 	ListAllUserRoots() ([]*UserRoot, error)            // 管理台总览
@@ -104,7 +104,7 @@ type Store interface {
 	SetFolderACL(a *FolderACL) error // 按 (rootID,path,subjectType,subjectID) upsert
 	GetFolderACLs(rootID, path string) ([]*FolderACL, error)
 	ListRootACLs(rootID string) ([]*FolderACL, error) // rootID=="" 返回全部（管理员用）
-	// ListPublicViewACLs 主体为 public 且 view=1 的条目（匿名"公开共享目录"清单，0.5.0）。
+	// ListPublicViewACLs 主体为 public 且 view=1 的条目（匿名"公开共享目录"清单）。
 	ListPublicViewACLs() ([]*FolderACL, error)
 	DeleteFolderACL(id int64) error
 	DeleteFolderACLsBySubject(subjectType string, subjectID int64) error
@@ -123,13 +123,23 @@ type Store interface {
 	DeleteFileVersion(id int64) error
 	DeleteFileVersions(rootID, path string) error
 
-	// 登录会话（refresh token，滑动过期）
+	// 登录会话（refresh token，滑动过期）——0.2.3 起认证走 auth_sessions（下方），
+	// 本组方法与 sessions 表保留不再读写（磁盘兼容，不做 ALTER/DROP）
 	CreateSession(sess *Session) error
 	GetSessionByTokenHash(tokenHash string) (*Session, error)
 	RenewSession(id int64, expiresAt, lastUsedAt time.Time) error
 	DeleteSession(id int64) error
 	DeleteSessionsByUser(userID int64) error
 	DeleteExpiredSessions(now time.Time) error
+
+	// 认证会话（0.2.3：三层认证图持久层，不透明随机凭证；internal/auth.Center）
+	CreateAuthSession(a *AuthSession) error
+	GetAuthSessionByTokenHash(tokenHash string) (*AuthSession, error)
+	RenewAuthSession(id int64, expiresAt, lastUsedAt time.Time) error // 无行→ErrNotFound（撤权竞态判据）
+	DeleteAuthSessionByTokenHash(tokenHash string) error
+	DeleteAuthSessionsByUser(userID int64) error // userID<0 非法（share 保留 -1，调用方守门）
+	DeleteExpiredAuthSessions(now time.Time) error
+	ListActiveAuthSessions(limit int) ([]*AuthSession, error) // 未过期，token_hash 升序窗口（重启预热）
 
 	// 分片上传会话（断点续传，跨实例共享）
 	CreateUploadSession(u *UploadSession) error
@@ -140,7 +150,7 @@ type Store interface {
 	DeleteUploadSession(id string) error
 	DeleteUploadSessionsBefore(before time.Time) error
 
-	// 审计日志（0.5.1）
+	// 审计日志
 	AddAuditEvent(e *AuditEvent) error
 	ListAuditEvents(limit int, userID int64) ([]*AuditEvent, error) // userID<=0 全部
 	DeleteAuditBefore(before time.Time) error
@@ -154,7 +164,7 @@ type Options struct {
 
 // NormalizeDriver 将用户配置的驱动名规范为 DriverFile/DriverSQLite/DriverMySQL/DriverPg。
 // 0.1.1 起 ""/"none" 是 "file" 的别名（无数据库 = 文件存储，全功能可用；旧的
-// "返回空串进入降级模式"语义废止）。json/memory 驱动已在 0.3.0 移除。
+// "返回空串进入降级模式"语义废止）。json/memory 驱动已移除。
 // 配置校验（internal/config）与 Open 共用本函数。
 func NormalizeDriver(s string) (string, error) {
 	switch s {
@@ -167,7 +177,7 @@ func NormalizeDriver(s string) (string, error) {
 	case "postgres", "postgresql", "pg":
 		return DriverPg, nil
 	case "json", "memory":
-		return "", fmt.Errorf("store: driver %q was removed in 0.3.0 (configure sqlite3|mysql|postgresql, or \"file\"/\"none\" for the built-in file store)", s)
+		return "", fmt.Errorf("store: driver %q was removed in a prior version (configure sqlite3|mysql|postgresql, or \"file\"/\"none\" for the built-in file store)", s)
 	default:
 		return "", fmt.Errorf("store: unknown driver %q (want file|sqlite3|mysql|postgresql)", s)
 	}

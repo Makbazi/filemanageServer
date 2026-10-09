@@ -45,6 +45,9 @@ type fileIndex struct {
 	sessions   map[int64]*sessionRow
 	sessByHash map[string]*sessionRow
 
+	authSessions map[int64]*authSessionRow
+	authByHash   map[string]*authSessionRow // token_hash 唯一（认证图）
+
 	uploads map[string]*uploadRow
 
 	metas map[string]string // server_meta
@@ -55,18 +58,19 @@ type fileIndex struct {
 func newFileIndex() *fileIndex {
 	return &fileIndex{
 		users: map[int64]*userRow{}, usersByName: map[string]*userRow{},
-		userRoots:   map[int64]*userRootRow{},
-		fileMetas:   map[int64]*fileMetaRow{}, fileMetasBy: map[string]*fileMetaRow{},
-		aiDescs:     map[int64]*aiDescRow{}, aiDescsBy: map[string]*aiDescRow{},
-		trash:       map[int64]*trashRow{}, trashByID: map[string]*trashRow{},
-		groups:      map[int64]*groupRow{}, groupsByName: map[string]*groupRow{},
-		acls:        map[int64]*aclRow{}, aclsBy: map[string]*aclRow{},
-		shares:      map[int64]*shareRow{}, sharesByToken: map[string]*shareRow{},
-		versions:    map[int64]*versionRow{}, versionsBy: map[string]*versionRow{},
-		sessions:    map[int64]*sessionRow{}, sessByHash: map[string]*sessionRow{},
-		uploads:     map[string]*uploadRow{},
-		metas:       map[string]string{},
-		audits:      map[int64]*auditRow{},
+		userRoots: map[int64]*userRootRow{},
+		fileMetas: map[int64]*fileMetaRow{}, fileMetasBy: map[string]*fileMetaRow{},
+		aiDescs: map[int64]*aiDescRow{}, aiDescsBy: map[string]*aiDescRow{},
+		trash: map[int64]*trashRow{}, trashByID: map[string]*trashRow{},
+		groups: map[int64]*groupRow{}, groupsByName: map[string]*groupRow{},
+		acls: map[int64]*aclRow{}, aclsBy: map[string]*aclRow{},
+		shares: map[int64]*shareRow{}, sharesByToken: map[string]*shareRow{},
+		versions: map[int64]*versionRow{}, versionsBy: map[string]*versionRow{},
+		sessions: map[int64]*sessionRow{}, sessByHash: map[string]*sessionRow{},
+		authSessions: map[int64]*authSessionRow{}, authByHash: map[string]*authSessionRow{},
+		uploads: map[string]*uploadRow{},
+		metas:   map[string]string{},
+		audits:  map[int64]*auditRow{},
 	}
 }
 
@@ -251,6 +255,20 @@ func (x *fileIndex) put(t byte, payload []byte, nextID *[tCount + 1]int64) error
 		x.sessions[r.ID] = &r
 		x.sessByHash[r.TokenHash] = &r
 		bumpID(nextID, t, r.ID)
+	case tAuthSessions:
+		var r authSessionRow
+		if err := json.Unmarshal(payload, &r); err != nil {
+			return err
+		}
+		if old := x.authSessions[r.ID]; old != nil && x.authByHash[old.TokenHash] == old {
+			delete(x.authByHash, old.TokenHash)
+		}
+		if e, ok := x.authByHash[r.TokenHash]; ok && e.ID != r.ID {
+			return dupErr("auth_sessions.token_hash")
+		}
+		x.authSessions[r.ID] = &r
+		x.authByHash[r.TokenHash] = &r
+		bumpID(nextID, t, r.ID)
 	case tUploadSessions:
 		var r uploadRow
 		if err := json.Unmarshal(payload, &r); err != nil {
@@ -360,6 +378,13 @@ func (x *fileIndex) del(t byte, payload []byte) error {
 			}
 			delete(x.sessions, id)
 		}
+	case tAuthSessions:
+		if r := x.authSessions[id]; r != nil {
+			if x.authByHash[r.TokenHash] == r {
+				delete(x.authByHash, r.TokenHash)
+			}
+			delete(x.authSessions, id)
+		}
 	case tAuditEvents:
 		delete(x.audits, id)
 	default:
@@ -387,6 +412,7 @@ func (x *fileIndex) counts() map[string]int64 {
 		"trash_items": int64(len(x.trash)), "groups": int64(len(x.groups)),
 		"folder_acls": int64(len(x.acls)), "share_links": int64(len(x.shares)),
 		"file_versions": int64(len(x.versions)), "sessions": int64(len(x.sessions)),
+		"auth_sessions":   int64(len(x.authSessions)),
 		"upload_sessions": int64(len(x.uploads)), "server_meta": int64(len(x.metas)),
 		"audit_events": int64(len(x.audits)),
 	}

@@ -14,8 +14,8 @@
 //
 // generation 为凭据纪元：任何凭据变更（含检测到外部文件编辑）都会 +1 并
 // 回写，超管访问令牌嵌入纪元、authCtx 逐请求核对——口令轮换/文件重置即
-// 吊销全部旧令牌与会话。多实例部署时该文件与 jwt.secret 同理需放共享卷
-// 或逐节点保持一致（见 server CLAUDE.md 约定7）。
+// 吊销全部旧令牌与会话。多实例部署时该文件需放共享卷或逐节点保持一致
+// （与历史遗留的 jwt.secret 同规则，后者已弃用；见 server CLAUDE.md 约定7）。
 package superadmin
 
 import (

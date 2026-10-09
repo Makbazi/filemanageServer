@@ -1,4 +1,4 @@
-// 元数据模型定义（0.3.0 起由独立工程 filemanageDb 并入本服务端 internal/store）。
+// 元数据模型定义（由独立工程 filemanageDb 并入本服务端 internal/store）。
 // 敏感字段三件套 PasswordHash/TokenHash 均为 json:"-"（防 API 泄露）；
 // redis 缓存层持久化这些模型时必须使用影子结构保留敏感字段（见 internal/cache）。
 package store
@@ -74,10 +74,10 @@ type SearchHit struct {
 	Score float64 `json:"score"`
 }
 
-// ---------- 用户根分配（0.5.0 jail 模型：管理员分配目录，用户只见所分配目录） ----------
+// ---------- 用户根分配（jail 模型：管理员分配目录，用户只见所分配目录） ----------
 
 // UserRoot 管理员为用户分配的一个虚拟根：物理根 root_id 下的子目录 sub_path。
-// sub_path 为 "" 表示整个物理根（0.3.x 老配置的等价迁移）。用户在用户端口
+// sub_path 为 "" 表示整个物理根（老配置的等价迁移）。用户在用户端口
 // 只能访问自己被授予的虚拟根；物理配置根本身对用户不可见。
 // 旧字段 User.AllowedRoots 仅作为迁移输入保留，运行时判定一律以本表为准。
 type UserRoot struct {
@@ -175,7 +175,43 @@ type Session struct {
 	CreatedAt  time.Time `json:"createdAt"`
 }
 
-// ---------- 审计日志（0.5.1：安全可追溯迭代） ----------
+// ---------- 认证会话（0.2.3：三层认证图，去 JWT） ----------
+
+// 认证会话种类（Kind 必须持久——重启 Warm 恢复后仍须区分身份会话与分享会话：
+// share 行绝不可被当作登录身份注入）：
+//   - user：登录会话（客户端用户/管理台超管/DB 管理员）；有效期策略按持久化
+//     Role 判定——Role=admin（含超管）为绝对 session.accessTTL 且不滑动（保持
+//     管理面每小时重登节奏），普通用户滑动 session.idleDays（每次认证请求续期）；
+//   - share：分享链接解锁会话，绝对 2h，Ref 绑定链接 token。
+const (
+	AuthKindUser  = "user"
+	AuthKindShare = "share"
+)
+
+// AuthShareUserID share 行的 user_id 保留值——与超管哨兵 SuperAdminID(0) 区分，
+// 按用户撤权（RevokeUser）绝不触碰 share 行，share 校验也绝不落入用户身份注入。
+const AuthShareUserID int64 = -1
+
+// AuthSession 一条认证凭据记录（认证图条目的持久形态）。凭证本身为随机 64-hex
+// 字符串（不编码任何身份），表与各级缓存只存其 SHA-256（TokenHash，json:"-"，
+// 永不出 API——敏感哈希纪律同 PasswordHash）。真实身份（UserID/Username/Role/
+// Super/Gen）仅存服务端，校验时由认证图解析。
+type AuthSession struct {
+	ID         int64     `json:"id"`
+	Kind       string    `json:"kind"`
+	UserID     int64     `json:"userId"` // 0=超管哨兵；-1=share 保留
+	Username   string    `json:"username"`
+	Role       string    `json:"role"`
+	Super      bool      `json:"super"`
+	Gen        int64     `json:"gen"` // 超管凭据纪元（逐请求核对，需求32/34）
+	Ref        string    `json:"ref"` // share：绑定的链接 token（share_links.token）
+	TokenHash  string    `json:"-"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	LastUsedAt time.Time `json:"lastUsedAt"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// ---------- 审计日志（安全可追溯迭代） ----------
 
 // AuditEvent 关键安全事件（登录/账户与权限变更/删除/分享/回滚）。
 // 保留 90 天由后台 Cleaner 自动清理；仅管理端口可查询。

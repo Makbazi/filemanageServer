@@ -28,7 +28,7 @@ deploy/
 ./filemanage-server -config /data/node2/server.json   # listen 0.0.0.0:8486
 ```
 
-> **0.5.0+/0.1.0 提醒**：每个实例还必须绑定**唯一**的 `adminListen`（如
+> **0.1.0 提醒**：每个实例还必须绑定**唯一**的 `adminListen`（如
 > `127.0.0.1:18485+i`，全部用默认值会互相冲突启动失败）。管理面访问范围由
 > `adminAccess` 决定（`local` 仅本机回环=默认/`lan`/`any`/`custom` 指定 IP·CIDR），
 > 与用户端口的 `lanOnly` 互不影响；建议保持 127.0.0.1 绑定 + SSH 隧道访问。
@@ -56,7 +56,7 @@ worker 配置示例（`server.json`）：
 **共享数据组成集群**：若希望多实例共享同一份数据（而不是各自独立），
 让所有节点配置指向**相同**的 `db.dsn`、`roots[].path`、`trashDir`、
 `uploadStagingDir`、`secretFile` 即可（例如统一用 `/data/shared/...`）。
-0.7.0 起用户文件与家目录内回收站实体位于 `<dataDir>/Users/<用户名>`——共享部署时
+用户文件与家目录内回收站实体位于 `<dataDir>/Users/<用户名>`——共享部署时
 `dataDir` 也必须指向共享卷（管理台"数据库"页的热切换仅对本节点生效，需逐台操作；
 0.1.0 超管账户文件 `admin-account.json` 同样随 dataDir，多实例需共享或逐节点一致）。
 注意：
@@ -107,7 +107,7 @@ worker 配置示例（`server.json`）：
 
 ## 三、Docker 镜像构建（需求28）
 
-0.3.0 起服务端自含元数据层（`internal/store`，sqlite3/mysql/postgresql 三驱动，
+服务端自含元数据层（`internal/store`，sqlite3/mysql/postgresql 三驱动，
 纯 Go 无 CGO），无任何同级模块依赖——**构建上下文按下方示例取仓库根目录**
 （`filemanage/`，与 compose 组织保持一致；单独以 `filemanageServer/` 为上下文亦可，
 需相应调整 Dockerfile 内 COPY 路径）。三个 Dockerfile 均为多阶段构建

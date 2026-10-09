@@ -87,7 +87,7 @@ func mysqlDDL() []string {
 			status VARCHAR(16) NOT NULL DEFAULT 'uploading',
 			created_at DATETIME(3) NOT NULL, updated_at DATETIME(3) NOT NULL,
 			KEY idx_upload_active (root_id, path, status))` + mysqlTail,
-		// ---- v0.5.0 新增表 ----
+		// ---- 新增表 ----
 		`CREATE TABLE IF NOT EXISTS user_roots (
 			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 			user_id BIGINT NOT NULL, root_id VARCHAR(32) NOT NULL,
@@ -102,5 +102,15 @@ func mysqlDDL() []string {
 			root_id VARCHAR(32) NOT NULL DEFAULT '', path VARCHAR(700) NOT NULL DEFAULT '',
 			detail VARCHAR(500) NOT NULL DEFAULT '', ip VARCHAR(64) NOT NULL DEFAULT '',
 			KEY idx_audit_created (created_at))` + mysqlTail,
+		// ---- 0.2.3 auth_sessions（三层认证图持久层） ----
+		`CREATE TABLE IF NOT EXISTS auth_sessions (
+			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			kind VARCHAR(16) NOT NULL DEFAULT 'user', user_id BIGINT NOT NULL,
+			username VARCHAR(64) NOT NULL DEFAULT '', role VARCHAR(16) NOT NULL DEFAULT '',
+			super TINYINT NOT NULL DEFAULT 0, gen BIGINT NOT NULL DEFAULT 0,
+			ref VARCHAR(128) NOT NULL DEFAULT '', token_hash VARCHAR(128) NOT NULL UNIQUE,
+			expires_at DATETIME(3) NOT NULL, last_used_at DATETIME(3) NOT NULL,
+			created_at DATETIME(3) NOT NULL,
+			KEY idx_authsess_exp (expires_at))` + mysqlTail,
 	}
 }

@@ -47,11 +47,11 @@ func (s *Server) handleAdminGetSuper(c *gin.Context) {
 		return
 	}
 	writeJSON(c, http.StatusOK, map[string]any{
-		"username":  name,
+		"username":   name,
 		"generation": gen,
 		// 需求34：仅未使用（明文）时回显口令；已转密文则只报状态。
-		"password":   pw,
-		"plaintext":  plaintext,
+		"password":  pw,
+		"plaintext": plaintext,
 		"passwordHint": map[bool]string{true: "当前为明文（首次登录成功后自动转密文）",
 			false: "已是密文（bcrypt），不可回显；如需重置请编辑账户文件或配置 adminPassword"}[plaintext],
 	})
@@ -78,8 +78,16 @@ func (s *Server) handleAdminPutSuper(c *gin.Context) {
 		writeErr(c, http.StatusBadRequest, err)
 		return
 	}
-	// 纪元已变 → 立即以新纪元签发访问令牌（超管会话不落 refresh，见 CLAUDE.md 约定）。
-	at, err := auth.IssueSuperAccess(s.Cfg.JWTSecret, acct.Username, acct.Generation, s.Cfg.AccessTTLDuration())
+	// 纪元已变 → 三层显式清空全部超管凭证（0.2.3：authCtx 的逐请求纪元核对仍是
+	// 权威兜底，此处主动清理让旧令牌即刻、跨实例消失而非等 memTTL/自然过期），
+	// 再以新纪元签发新凭证回给管理台换用（否则改密后当前会话立即失效无法继续操作）。
+	_ = s.Auth.RevokeUser(c.Request.Context(), store.SuperAdminID)
+	persist := s.dbReady()
+	at, err := s.Auth.Issue(c.Request.Context(), auth.Spec{
+		Kind: store.AuthKindUser, UserID: store.SuperAdminID, Username: acct.Username,
+		Role: store.RoleAdmin, Super: true, Gen: acct.Generation,
+		TTL: s.Cfg.AccessTTLDuration(), Persist: persist,
+	})
 	if err != nil {
 		writeErr(c, http.StatusInternalServerError, err)
 		return

@@ -1,4 +1,4 @@
-// homes.go：用户主目录分配（0.7.0 需求3）。
+// homes.go：用户主目录分配（需求3）。
 //
 // 规则：任何用户创建路径（管理台建号/引导注册/恢复管理员）都必须为用户
 // 建立 <dataDir>/Users/<用户名> 家目录并自动分配内部合成根 (_users,<用户名>)，
@@ -94,7 +94,7 @@ func EnsureHomeFor(st store.Store, usersDir string, u *store.User) error {
 
 // EnsureUserHomes 启动一次性存量迁移：为所有尚无家目录分配的存量用户补齐
 // （建目录+追加分配，保留既有任何其他分配）。server_meta 标记幂等；
-// 不安全用户名（0.7.0 前无校验时代的遗留）跳过并告警，不阻塞启动。
+// 不安全用户名（早期无校验时代的遗留）跳过并告警，不阻塞启动。
 func EnsureUserHomes(st store.Store, usersDir string) error {
 	done, err := st.GetMeta(homesMetaKey)
 	if err != nil {

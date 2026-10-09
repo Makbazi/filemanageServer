@@ -18,7 +18,7 @@ import (
 	"filemanageServer/internal/transfer"
 )
 
-// writeJSON 统一 JSON 响应（0.3.0 起走 gin，但保持 0.2.x 逐字节一致的
+// writeJSON 统一 JSON 响应（现走 gin，但保持 0.2.x 逐字节一致的
 // Content-Type / 编码方式——json.Encoder 自带换行，勿改用 c.JSON）。
 func writeJSON(c *gin.Context, code int, v any) {
 	c.Header("Content-Type", "application/json; charset=utf-8")
@@ -52,7 +52,7 @@ func isNetDisconnect(err error) bool {
 
 // writeErr 统一错误响应 {error: "..."}。
 // 5xx（503 降级模式 errNoDB 为契约信息除外）对外只输出通用文案，
-// 原始错误写服务端日志——防止数据库驱动内部错误串泄露主机/账号（0.3.1）。
+// 原始错误写服务端日志——防止数据库驱动内部错误串泄露主机/账号。
 // 499（客户端断连，0.2.1）只记一行 info，绝不记 internal error。
 func writeErr(c *gin.Context, code int, err error) {
 	msg := err.Error()

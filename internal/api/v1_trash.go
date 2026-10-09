@@ -12,12 +12,12 @@ import (
 	store "filemanageServer/internal/store"
 )
 
-// 服务端回收站 = 磁盘实体 + 库中条目记录（0.7.0 需求3）：
+// 服务端回收站 = 磁盘实体 + 库中条目记录（需求3）：
 //   - 有家目录（_users 分配，正常建用户即有）→ 实体在 <dataDir>/Users/<用户名>/.fmtrash/<trashID>；
-//   - 无家目录（0.6.x 存量升级前的遗留用户等）→ 回退中央 trashDir/u<userID>/<trashID>。
+//   - 无家目录（家目录机制引入前的存量遗留用户等）→ 回退中央 trashDir/u<userID>/<trashID>。
 // 超过 trashRetentionDays（默认 30 天）的条目由后台 Cleaner 自动清理（需求4）。
 // trash_items 行不存实体路径，故还原/删除按"家目录优先、中央兜底"双候选解析，
-// 0.6.x 遗留中央 blob 无需搬移即可继续还原（无 schema 变更）。
+// 遗留中央 blob 无需搬移即可继续还原（无 schema 变更）。
 
 // homeOf 用户的家目录分配（_users 条目 SubPath）；无家目录返回 ""。
 func (s *Server) homeOf(u *store.User) string {
@@ -62,7 +62,7 @@ func (s *Server) trashBlobCandidates(u *store.User, trashID string) []string {
 }
 
 // handleTrashList GET /api/v1/trash?rootId=
-// 回收站条目按物理键存储（0.5.0）；rootId 过滤取虚拟根 id 的物理段，响应转显示键。
+// 回收站条目按物理键存储；rootId 过滤取虚拟根 id 的物理段，响应转显示键。
 func (s *Server) handleTrashList(c *gin.Context) {
 	u := currentUser(c)
 	filter := c.Request.URL.Query().Get("rootId")
@@ -107,8 +107,8 @@ func (s *Server) handleTrashRestore(c *gin.Context) {
 		writeErr(c, statusOf(err), err)
 		return
 	}
-	src := s.resolveTrashBlob(u, item.TrashID)           // 家目录优先、中央遗留兜底（0.7.0）
-	sc, err := s.scopePhys(c, item.RootID, item.RelPath) // 物理键形式反查授权（分配被回收则拒绝，0.6.0）
+	src := s.resolveTrashBlob(u, item.TrashID)           // 家目录优先、中央遗留兜底
+	sc, err := s.scopePhys(c, item.RootID, item.RelPath) // 物理键形式反查授权（分配被回收则拒绝）
 	if err != nil {
 		s.restoreFailed(item)
 		writeErr(c, statusOf(err), err)

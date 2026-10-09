@@ -1,7 +1,7 @@
 # =============================================================================
 # filemanage-server —— Ubuntu 22.04 运行镜像（需求27/28：容器化多实例部署）
 #
-# 构建命令（0.3.0 起服务端自含元数据层 internal/store，不再依赖任何同级模块；
+# 构建命令（服务端自含元数据层 internal/store，不再依赖任何同级模块；
 # 为兼容 compose 组织方式仍以仓库根为构建上下文，路径相对于仓库根）：
 #   cd /path/to/filemanage
 #   docker build -f filemanageServer/deploy/docker/ubuntu22.04/Dockerfile \

@@ -10,7 +10,7 @@
 #     因此这里 FROM rockylinux/rockylinux:9，以获得持续的安全更新。
 #     （如内网环境只镜像了 library 标签，可改回 `FROM rockylinux:9`，构建步骤相同。）
 #
-# 构建命令（0.3.0 起服务端自含元数据层 internal/store，不再依赖任何同级模块；
+# 构建命令（服务端自含元数据层 internal/store，不再依赖任何同级模块；
 # 为兼容 compose 组织方式仍以仓库根为构建上下文，路径相对于仓库根）：
 #   cd /path/to/filemanage
 #   docker build -f filemanageServer/deploy/docker/rockylinux/Dockerfile \

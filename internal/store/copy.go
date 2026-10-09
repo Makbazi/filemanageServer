@@ -1,7 +1,7 @@
-// copy.go：跨驱动/跨库全表元数据搬迁（0.7.0 管理台热切换可选"迁移现有数据"；
+// copy.go：跨驱动/跨库全表元数据搬迁（管理台热切换可选"迁移现有数据"；
 // 0.1.1 起两端可为文件存储——file→db 迁移与 db→file 导出共用本通道）。
 //
-// 方式：按表 keyset 分批（按主键升序，每批 ≤1000）从源端读出（复用 rows.go 的 13 个
+// 方式：按表 keyset 分批（按主键升序，每批 ≤1000）从源端读出（复用 rows.go 的 14 个
 // 行模型为传输载体，字段编码由驱动层负责），原样保留主键写入目标端；目标须为**空**
 // （connect/export 前置检查 TableNonEmpty，非空且未 force 时 API 层返回 409，本层不做强判）。
 // postgresql 目标额外重置各 serial 序列（显式主键插入不推进 SERIAL）；sqlite/mysql
@@ -34,7 +34,7 @@ func asFileStore(st Store) (*fileStore, bool) {
 	return s, ok
 }
 
-// rowSource/rowSink：13 行模型的批量读/写通道（两端各自实现，见 sqlstore.go 尾部
+// rowSource/rowSink：14 行模型的批量读/写通道（两端各自实现，见 sqlstore.go 尾部
 // 与 filecopy.go）。
 type rowSource interface {
 	copyScan(table string, fn func(batch any) error) error
@@ -123,14 +123,16 @@ func batchSizeOf(batch any) int64 {
 		return int64(len(b))
 	case []auditRow:
 		return int64(len(b))
+	case []authSessionRow:
+		return int64(len(b))
 	}
 	return 0
 }
 
-// tableNames 全表清单（非空检查与状态展示共用；序 1..13 = filelog 表序）。
+// tableNames 全表清单（非空检查与状态展示共用；序 1..14 = filelog 表序）。
 var tableNames = []string{"users", "user_roots", "file_metas", "ai_descriptions",
 	"trash_items", "groups", "folder_acls", "share_links", "file_versions",
-	"sessions", "upload_sessions", "server_meta", "audit_events"}
+	"sessions", "upload_sessions", "server_meta", "audit_events", "auth_sessions"}
 
 // TableNonEmpty 返回 st 中已有数据的表名（迁移前置检查）。
 func TableNonEmpty(st Store) ([]string, error) {

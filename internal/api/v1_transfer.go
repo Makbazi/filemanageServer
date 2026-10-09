@@ -48,7 +48,7 @@ func (s *Server) serveContent(c *gin.Context, abs, name string, inline bool) {
 
 // handleDownload GET /api/v1/download?rootId=&path=。
 // 正常模式：需登录 + Download 权限（需求6，匿名 401 与 0.2.x 一致）；
-// 降级模式（0.3.0 无元数据库）：匿名按只读决策放开下载（用户决策，见 degradedView）。
+// 降级模式（无元数据库）：匿名按只读决策放开下载（用户决策，见 degradedView）。
 func (s *Server) handleDownload(c *gin.Context) {
 	rootID := c.Request.URL.Query().Get("rootId")
 	rel := fileops.CleanRel(c.Request.URL.Query().Get("path"))
@@ -120,7 +120,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 		writeErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	// 整文件大小硬上限（maxUploadBytes，0=不限；超限 413，不落地半成品，0.3.1）
+	// 整文件大小硬上限（maxUploadBytes，0=不限；超限 413，不落地半成品）
 	n, err := fileops.WriteFileAtomicLimit(sc.Abs, body, s.Cfg.MaxUploadBytes)
 	if err != nil {
 		writeErr(c, statusOf(err), err)
@@ -144,7 +144,7 @@ func (s *Server) handleUpload(c *gin.Context) {
 
 // ---------- 分片上传 / 断点续传（需求3） ----------
 
-// uploadSessionView 会话对外视图（rootId/path 已由调用方换算为客户端显示键，0.5.0）。
+// uploadSessionView 会话对外视图（rootId/path 已由调用方换算为客户端显示键）。
 func uploadSessionView(sess *store.UploadSession, resumed bool, dispRoot, dispPath string) map[string]any {
 	return map[string]any{
 		"sessionId":      sess.ID,

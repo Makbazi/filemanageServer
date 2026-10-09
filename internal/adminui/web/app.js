@@ -298,7 +298,7 @@ async function loadUsers() {
   } catch (e) { /* 已弹提示 */ }
 }
 
-// 0.5.0 jail 模型：用户可见目录 = 管理员分配（user_roots）；未分配则用户端口一无所见
+// jail 模型：用户可见目录 = 管理员分配（user_roots）；未分配则用户端口一无所见
 function rootsHTML(rs) {
   if (!rs || !rs.length) return '<span class="badge red">未分配（用户端口不可见）</span>';
   return rs.map((r) => `<span class="badge purple">${esc(rootName(r.rootId))}:${esc(r.subPath || "/")}${r.alias ? " · " + esc(r.alias) : ""}</span>`).join(" ");
@@ -341,7 +341,7 @@ function renderUsers() {
 }
 
 // 新建（user 为 null）/ 编辑用户模态框。
-// 0.5.0 jail 模型：目录分配编辑器（一人可多个 (根,子目录)；子目录留空=整根；
+// jail 模型：目录分配编辑器（一人可多个 (根,子目录)；子目录留空=整根；
 // 内联 📁 浏览物理根选择子目录；分配不存在的子目录时服务端自动创建）。
 function openUserModal(user) {
   const editing = !!user;
@@ -907,7 +907,7 @@ function showLinkCreated(res) {
   if (pwdBtn) pwdBtn.addEventListener("click", () => copyText(res.password));
 }
 
-/* ---------- 十三之二、审计日志 tab（0.5.1） ---------- */
+/* ---------- 十三之二、审计日志 tab ---------- */
 const AUDIT_ACTIONS = {
   login: ["登录成功", "green"], login_fail: ["登录失败", "red"], register: ["引导注册", "purple"],
   user_create: ["创建用户", "blue"], user_update: ["修改用户", "blue"], user_delete: ["删除用户", "red"],
@@ -943,13 +943,13 @@ function renderAudits(events) {
   }).join("");
 }
 
-/* ---------- 十三之三、数据库 tab（0.7.0 管理台配库/热切换） ---------- */
+/* ---------- 十三之三、数据库 tab（管理台配库/热切换） ---------- */
 let dbDrivers = null;        // GET /admin/db/drivers 缓存（静态）
 let dbStatus = null;         // GET /admin/db/status 最近一次结果
 let dbStatusDegraded = false; // 最近一次探测的降级状态（refreshTabAccess 同步）
 
 // dbApi：数据库配置面专用封装（0.1.0 需求33：统一 Bearer 登录态——超管或 DB
-// 管理员；0.7.0 的 X-DB-Unlock 解锁头随 firstBoot 流程移除）。与 api() 的区别：
+// 管理员；X-DB-Unlock 解锁头随 firstBoot 流程移除）。与 api() 的区别：
 // 401 仅在已有 token 时登出（status 探测在未登录状态也会调用）；409 交给调用方处理。
 async function dbApi(path, { method = "GET", body } = {}) {
   const headers = {};

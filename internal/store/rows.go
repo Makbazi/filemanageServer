@@ -1,4 +1,4 @@
-// rows.go：gorm 行对象（0.6.0，需求2：SQL 操作一律走框架）。
+// rows.go：gorm 行对象（需求2：SQL 操作一律走框架）。
 //
 // 列名/列类型与已发布 DDL（dialect_*.go）逐字对齐，仅作为 SQL 映射层存在：
 //   - 布尔列存 INTEGER/SMALLINT 0/1（保持既有 sqlite .db 文件字节兼容，
@@ -303,6 +303,37 @@ func (r sessionRow) fromSession(s *Session) sessionRow {
 
 func (r sessionRow) to() *Session {
 	return &Session{ID: r.ID, UserID: r.UserID, TokenHash: r.TokenHash,
+		ExpiresAt: r.ExpiresAt, LastUsedAt: r.LastUsedAt, CreatedAt: r.CreatedAt}
+}
+
+// ---------- auth_sessions（0.2.3 三层认证图持久层） ----------
+
+type authSessionRow struct {
+	ID         int64     `gorm:"column:id;primaryKey;autoIncrement"`
+	Kind       string    `gorm:"column:kind"`
+	UserID     int64     `gorm:"column:user_id"`
+	Username   string    `gorm:"column:username"`
+	Role       string    `gorm:"column:role"`
+	Super      int64     `gorm:"column:super"` // b2i/i2b（pg 布尔列陷阱，对齐 shareRow）
+	Gen        int64     `gorm:"column:gen"`
+	Ref        string    `gorm:"column:ref"`
+	TokenHash  string    `gorm:"column:token_hash"`
+	ExpiresAt  time.Time `gorm:"column:expires_at"`
+	LastUsedAt time.Time `gorm:"column:last_used_at"`
+	CreatedAt  time.Time `gorm:"column:created_at"`
+}
+
+func (authSessionRow) TableName() string { return "auth_sessions" }
+
+func (r authSessionRow) fromAuthSession(a *AuthSession) authSessionRow {
+	return authSessionRow{ID: a.ID, Kind: a.Kind, UserID: a.UserID, Username: a.Username,
+		Role: a.Role, Super: b2i(a.Super), Gen: a.Gen, Ref: a.Ref, TokenHash: a.TokenHash,
+		ExpiresAt: a.ExpiresAt, LastUsedAt: a.LastUsedAt, CreatedAt: a.CreatedAt}
+}
+
+func (r authSessionRow) to() *AuthSession {
+	return &AuthSession{ID: r.ID, Kind: r.Kind, UserID: r.UserID, Username: r.Username,
+		Role: r.Role, Super: i2b(r.Super), Gen: r.Gen, Ref: r.Ref, TokenHash: r.TokenHash,
 		ExpiresAt: r.ExpiresAt, LastUsedAt: r.LastUsedAt, CreatedAt: r.CreatedAt}
 }
 

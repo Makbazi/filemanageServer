@@ -262,7 +262,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
 ::-webkit-scrollbar-thumb:hover { background: rgba(139, 92, 246, 0.5); }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* ===== 0.7.0 数据库配置页（管理台配库/热切换） ===== */
+/* ===== 数据库配置页（管理台配库/热切换） ===== */
 /* 首启/引导模式：只显示"数据库"页签 */
 .setup-mode .nav-item:not([data-tab="db"]) { display: none; }
 /* 登录视图：登录卡片与"前往数据库设置"入口可并排换行 */

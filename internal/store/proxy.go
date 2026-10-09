@@ -1,8 +1,8 @@
-// proxy.go：可在运行期原子替换底层实现的 Store 代理（0.7.0 管理台配库热切换）。
+// proxy.go：可在运行期原子替换底层实现的 Store 代理（管理台配库热切换）。
 //
-// 背景：0.6.0 及之前 Store 是启动期捕获的单例（api.Server/perm/transfer/
+// 背景：旧形态下 Store 是启动期捕获的单例（api.Server/perm/transfer/
 // fileops/cleaner/cache 装饰器共享同一实例），无法在不重启进程的情况下换库。
-// 0.7.0 起装配顺序为 store.Open → NewProxy → cache.Wrap(proxy)（可选）→
+// 现装配顺序为 store.Open → NewProxy → cache.Wrap(proxy)（可选）→
 // NewServer/Cleaner，各消费方持有的是 Proxy（或其装饰器），管理台 connect
 // 成功后 Set() 原子换入新库即可全局生效（旧委托由调用方负责 Close）。
 //
@@ -593,6 +593,62 @@ func (p *Proxy) DeleteExpiredSessions(now time.Time) error {
 		return ErrNoDB
 	}
 	return s.DeleteExpiredSessions(now)
+}
+
+func (p *Proxy) CreateAuthSession(a *AuthSession) error {
+	s := p.Current()
+	if s == nil {
+		return ErrNoDB
+	}
+	return s.CreateAuthSession(a)
+}
+
+func (p *Proxy) GetAuthSessionByTokenHash(tokenHash string) (*AuthSession, error) {
+	s := p.Current()
+	if s == nil {
+		return nil, ErrNoDB
+	}
+	return s.GetAuthSessionByTokenHash(tokenHash)
+}
+
+func (p *Proxy) RenewAuthSession(id int64, expiresAt, lastUsedAt time.Time) error {
+	s := p.Current()
+	if s == nil {
+		return ErrNoDB
+	}
+	return s.RenewAuthSession(id, expiresAt, lastUsedAt)
+}
+
+func (p *Proxy) DeleteAuthSessionByTokenHash(tokenHash string) error {
+	s := p.Current()
+	if s == nil {
+		return ErrNoDB
+	}
+	return s.DeleteAuthSessionByTokenHash(tokenHash)
+}
+
+func (p *Proxy) DeleteAuthSessionsByUser(userID int64) error {
+	s := p.Current()
+	if s == nil {
+		return ErrNoDB
+	}
+	return s.DeleteAuthSessionsByUser(userID)
+}
+
+func (p *Proxy) DeleteExpiredAuthSessions(now time.Time) error {
+	s := p.Current()
+	if s == nil {
+		return ErrNoDB
+	}
+	return s.DeleteExpiredAuthSessions(now)
+}
+
+func (p *Proxy) ListActiveAuthSessions(limit int) ([]*AuthSession, error) {
+	s := p.Current()
+	if s == nil {
+		return nil, ErrNoDB
+	}
+	return s.ListActiveAuthSessions(limit)
 }
 
 func (p *Proxy) CreateUploadSession(u *UploadSession) error {
