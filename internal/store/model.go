@@ -197,14 +197,18 @@ const AuthShareUserID int64 = -1
 // 永不出 API——敏感哈希纪律同 PasswordHash）。真实身份（UserID/Username/Role/
 // Super/Gen）仅存服务端，校验时由认证图解析。
 type AuthSession struct {
-	ID         int64     `json:"id"`
-	Kind       string    `json:"kind"`
-	UserID     int64     `json:"userId"` // 0=超管哨兵；-1=share 保留
-	Username   string    `json:"username"`
-	Role       string    `json:"role"`
-	Super      bool      `json:"super"`
-	Gen        int64     `json:"gen"` // 超管凭据纪元（逐请求核对，需求32/34）
-	Ref        string    `json:"ref"` // share：绑定的链接 token（share_links.token）
+	ID       int64  `json:"id"`
+	Kind     string `json:"kind"`
+	UserID   int64  `json:"userId"` // 0=超管哨兵；-1=share 保留
+	Username string `json:"username"`
+	Role     string `json:"role"`
+	Super    bool   `json:"super"`
+	Gen      int64  `json:"gen"` // 超管凭据纪元（逐请求核对，需求32/34）
+	Ref      string `json:"ref"` // share：绑定的链接 token（share_links.token）
+	// ClientID 客户端唯一标识（0.2.4）：登录时随凭证绑定，绑定会话逐请求核对
+	// X-Client-Id 头（不符=401，需重新登录）；空串=未绑定（旧客户端/移动端/
+	// 管理台会话），不核对。多客户端同账号各持己凭证互不挤占。
+	ClientID   string    `json:"clientId"`
 	TokenHash  string    `json:"-"`
 	ExpiresAt  time.Time `json:"expiresAt"`
 	LastUsedAt time.Time `json:"lastUsedAt"`

@@ -40,13 +40,17 @@ type TLSCfg struct {
 	AutoSelfSign bool   `json:"autoSelfSign"`
 }
 
-// SessionCfg 会话策略（需求22，0.2.3 起语义微调——不再有 JWT 访问令牌）：
+// SessionCfg 会话策略（需求22，0.2.3 起语义微调——不再有 JWT 访问令牌；
+// 0.2.4 起滑动窗口收敛为分钟级）：
 // AccessTTL = 管理台会话（超管/DB 管理员）绝对有效期（默认 1h，不滑动——
-// 保持"控制台每小时重登"节奏）；IdleDays = 客户端用户会话的滑动闲置窗口
-// （默认 21 天 = 3 周，每次认证请求自动续期，超过未使用必须重新登录）。
+// 保持"控制台每小时重登"节奏）；IdleMinutes = 客户端用户会话的滑动闲置窗口
+// （0.2.4 起默认 **60 分钟**：活跃即无感续命、超过 1h 未使用必须重新登录，
+// 凭证字符串在续期中永不变化）；IdleDays 为旧窗口字段（21 天），已弃用——
+// 仅为存量 v9 配置兼容保留，IdleMinutes>0 时一律以 IdleMinutes 为准。
 type SessionCfg struct {
-	AccessTTL string `json:"accessTTL"`
-	IdleDays  int    `json:"idleDays"`
+	AccessTTL   string `json:"accessTTL"`
+	IdleDays    int    `json:"idleDays"`
+	IdleMinutes int    `json:"idleMinutes"`
 }
 
 // AuthCfg 三层认证图容量与节奏（0.2.3，替代 JWT 方案；见 internal/auth/center.go）：
@@ -199,7 +203,7 @@ func DefaultConfig() *Config {
 		DataDir:            "./data",
 		TrashRetentionDays: 30,
 		MaxUploadBytes:     2 << 30,
-		Session:            SessionCfg{AccessTTL: "1h", IdleDays: 21},
+		Session:            SessionCfg{AccessTTL: "1h", IdleDays: 21, IdleMinutes: 60},
 		Auth:               AuthCfg{MemMaxEntries: 200000, MemTTL: "5m", RedisMaxEntries: 5000000, SweepInterval: "10m", TouchWriteEvery: "10m"},
 		Anonymous:          AnonymousCfg{Enabled: true},
 		Versions:           VersionsCfg{Enabled: true, MaxVersions: 10},
@@ -350,6 +354,9 @@ func finalize(c *Config) (*Config, error) {
 	if c.Session.IdleDays <= 0 {
 		c.Session.IdleDays = 21
 	}
+	if c.Session.IdleMinutes <= 0 {
+		c.Session.IdleMinutes = 60 // 0.2.4：用户会话滑动闲置窗口默认 1h（需求22 微调）
+	}
 	// 三层认证图默认（0.2.3）
 	if c.Auth.MemMaxEntries <= 0 {
 		c.Auth.MemMaxEntries = 200000
@@ -472,8 +479,13 @@ func (c *Config) AccessTTLDuration() time.Duration {
 	return d
 }
 
-// IdleDuration 返回用户会话滑动闲置上限（默认 3 周，每次认证请求续期）。
+// IdleDuration 返回用户会话滑动闲置上限（0.2.4 起默认 **1 小时**，每次认证
+// 请求无感续期、凭证字符串不变）。IdleMinutes>0 以分钟窗口为准；仅当
+// IdleMinutes 未设置（异常旧配置绕过迁移直读）时回退旧 idleDays 天窗口。
 func (c *Config) IdleDuration() time.Duration {
+	if c.Session.IdleMinutes > 0 {
+		return time.Duration(c.Session.IdleMinutes) * time.Minute
+	}
 	return time.Duration(c.Session.IdleDays) * 24 * time.Hour
 }
 

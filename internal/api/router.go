@@ -115,7 +115,8 @@ func (s *Server) registerV1(e *gin.Engine) {
 	// 降级模式管理台必须能登录；普通账户在 handler 内判无库 → 503（errNoDB）。
 	// 引导注册端点随文件超管模型移除（管理员由超管在管理台创建，需求33）。
 	v1.POST("/auth/login", s.handleLogin)
-	v1.POST("/auth/refresh", s.requireDB(), s.handleRefresh)
+	// 0.2.4：/auth/refresh 移除——滑动续期由 authCtx→Touch 服务端无感完成，
+	// 凭证只在重新登录时更换（旧客户端 refresh 退化=401 重登，兼容矩阵已明示）。
 
 	// ---- 分享链接匿名访问（需求7，凭 token+密码，无需登录）----
 	shr := e.Group("/s/:token", s.maintenanceGate(), s.requireDB())

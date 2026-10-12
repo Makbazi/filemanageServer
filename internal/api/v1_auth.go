@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -18,24 +19,29 @@ import (
 )
 
 // issueSession 为登录用户签发认证凭证（0.2.3 去 JWT：客户端只拿到一个随机哈希
-// 凭证，身份存服务端三层认证图）。有效期策略：普通用户=滑动闲置窗口
-// （session.idleDays，每次认证请求续期）；DB 管理员（仅管理台可用）=绝对
-// session.accessTTL 不滑动（保持"控制台每小时重登"节奏）。
-// refreshToken 字段回传**同一凭证**（兼容别名：旧客户端 ≤0.3.3 的 401→refresh
-// 链路原样工作，客户端实际只持有一个凭证）。
-func (s *Server) issueSession(ctx context.Context, u *store.User) (accessToken, refreshToken string, err error) {
+// 凭证，身份存服务端三层认证图；0.2.4 起响应面收敛——**只回这一个凭证**，
+// 不再带 accessToken/refreshToken/expiresIn 别名）。有效期策略：
+// 普通用户=滑动闲置窗口 session.idleMinutes（默认 **1 小时**，每次认证请求
+// 服务端无感续期、凭证字符串不变，超过未使用必须重新登录）；
+// DB 管理员（仅管理台可用）=绝对 session.accessTTL 不滑动（保持"控制台
+// 每小时重登"节奏，且不做客户端绑定）。
+// clientID：客户端唯一标识（0.2.4）——非空即把本凭证绑定到该客户端，
+// authCtx 逐请求核对 X-Client-Id（不符=401，需重新登录）；多客户端同账号
+// 各持己凭证互不挤占。管理台（role=admin）会话一律不绑定（控制台无标识头）。
+func (s *Server) issueSession(ctx context.Context, u *store.User, clientID string) (string, error) {
 	ttl := s.Cfg.IdleDuration()
 	if u.Role == store.RoleAdmin {
 		ttl = s.Cfg.AccessTTLDuration()
+		clientID = ""
 	}
 	cred, err := s.Auth.Issue(ctx, auth.Spec{
 		Kind: store.AuthKindUser, UserID: u.ID, Username: u.Username, Role: u.Role,
-		TTL: ttl, Persist: true,
+		ClientID: clientID, TTL: ttl, Persist: true,
 	})
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	return cred, cred, nil
+	return cred, nil
 }
 
 // userView 对外输出的用户信息（永不含密码哈希）。
@@ -54,17 +60,18 @@ func userView(u *store.User) map[string]any {
 
 // issueSuperSession 为超管签发认证凭证（嵌入当前凭据纪元，需求32/34 吊销机制：
 // 纪元推进由 authCtx 逐请求核对，PUT /admin/super 时另显式 RevokeUser(0) 三层清）。
-// 策略：管理台会话绝对 session.accessTTL（不滑动——控制台本就不做续期，见 app.js）。
+// 策略：管理台会话绝对 session.accessTTL（不滑动——控制台本就不做续期，见 app.js），
+// 不做客户端绑定（管理台无标识头）。0.2.4 起只返回单一凭证。
 // 有库时条目以 UserID=0 哨兵持久化（auth_sessions，与 DB 用户同表同语义）；
-// 降级异常路径无法持久化——refreshToken 为空（同旧行为），重启即失效。
-func (s *Server) issueSuperSession(ctx context.Context) (accessToken, refreshToken string, err error) {
+// 降级异常路径无法持久化（Persist=false，同旧行为），重启即失效。
+func (s *Server) issueSuperSession(ctx context.Context) (string, error) {
 	name, gerr := s.Super.Username()
 	if gerr != nil {
-		return "", "", gerr
+		return "", gerr
 	}
 	gen, gerr := s.Super.Generation()
 	if gerr != nil {
-		return "", "", gerr
+		return "", gerr
 	}
 	persist := s.dbReady()
 	cred, err := s.Auth.Issue(ctx, auth.Spec{
@@ -73,22 +80,29 @@ func (s *Server) issueSuperSession(ctx context.Context) (accessToken, refreshTok
 		TTL: s.Cfg.AccessTTLDuration(), Persist: persist,
 	})
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	if !persist {
-		return cred, "", nil
-	}
-	return cred, cred, nil
+	return cred, nil
 }
 
-// handleLogin POST /api/v1/auth/login {username,password}
+// handleLogin POST /api/v1/auth/login {username,password,clientId?}
+// 0.2.4 响应收敛：用户端口普通用户成功**只回 {"token}**（单一无透明随机凭证，
+// 身份/角色/有效期全存服务端认证图，客户端零格式假设）；管理台登录（admin 端口，
+// adminModeKey）保留 {"token","user"}——控制台靠 user.role 做进入门禁与顶栏显示。
+// clientId：客户端唯一标识（可选，≤64 字符）——提供即绑定本凭证（逐请求核对
+// X-Client-Id 头）；不提供=未绑定（旧客户端/移动端，行为同前）。
 func (s *Server) handleLogin(c *gin.Context) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		ClientID string `json:"clientId"`
 	}
 	if err := decode(c, &req); err != nil || req.Username == "" {
 		writeErr(c, http.StatusBadRequest, errors.New("username and password required"))
+		return
+	}
+	if len(req.ClientID) > 64 {
+		writeErr(c, http.StatusBadRequest, errors.New("clientId too long (max 64)"))
 		return
 	}
 	// 登录失败防爆破：与分享口令共用 bruteGuard，键="login|用户名"+客户端 IP，
@@ -125,17 +139,14 @@ func (s *Server) handleLogin(c *gin.Context) {
 			}
 			s.guard.Reset(bKey, ip)
 			s.audit(c, store.AuditLogin, req.Username, store.SuperAdminID, "", "", "superadmin login ok")
-			at, rt, err := s.issueSuperSession(c.Request.Context())
+			cred, err := s.issueSuperSession(c.Request.Context())
 			if err != nil {
 				writeErr(c, http.StatusInternalServerError, err)
 				return
 			}
 			writeJSON(c, http.StatusOK, map[string]any{
-				"token":        at,
-				"accessToken":  at,
-				"refreshToken": rt,
-				"expiresIn":    int(s.Cfg.AccessTTLDuration().Seconds()),
-				"user":         userView(&store.User{ID: store.SuperAdminID, Username: req.Username, Role: store.RoleAdmin}),
+				"token": cred,
+				"user":  userView(&store.User{ID: store.SuperAdminID, Username: req.Username, Role: store.RoleAdmin}),
 			})
 			return
 		}
@@ -166,107 +177,51 @@ func (s *Server) handleLogin(c *gin.Context) {
 	}
 	s.guard.Reset(bKey, ip)
 	s.audit(c, store.AuditLogin, u.Username, u.ID, "", "", "login ok")
-	at, rt, err := s.issueSession(c.Request.Context(), u)
+	cred, err := s.issueSession(c.Request.Context(), u, req.ClientID)
 	if err != nil {
 		writeErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	expiresIn := int(s.Cfg.IdleDuration().Seconds()) // 距到期秒数（滑动窗口起点）
 	if u.Role == store.RoleAdmin {
-		expiresIn = int(s.Cfg.AccessTTLDuration().Seconds())
+		// 走到这里必是管理台登录（用户端口 admin 已在上面 403）：保留 user 概要
+		// ——控制台门禁与顶栏依赖（0.2.4 明示决策）。
+		writeJSON(c, http.StatusOK, map[string]any{"token": cred, "user": userView(u)})
+		return
 	}
-	writeJSON(c, http.StatusOK, map[string]any{
-		"token":        at, // 兼容旧客户端字段名
-		"accessToken":  at,
-		"refreshToken": rt, // 兼容别名：与 token 同一凭证（客户端实际只持有一个）
-		"expiresIn":    expiresIn,
-		"user":         userView(u),
-	})
+	// 用户端口普通用户：只回单一无透明凭证，身份全存认证图。
+	writeJSON(c, http.StatusOK, map[string]any{"token": cred})
 }
 
-// handleRefresh POST /api/v1/auth/refresh {refreshToken}
-// 凭证轮换（0.2.3）：以现有凭证换取新随机凭证（旧即刻作废），身份与策略不变。
-// 普通用户凭证的滑动续期在每次认证请求已自动完成（authCtx→Touch），本端点
-// 承担显式轮换（旧客户端 401 自动刷新链路的兼容通道）；超管条目为绝对 TTL。
-func (s *Server) handleRefresh(c *gin.Context) {
-	var req struct {
-		RefreshToken string `json:"refreshToken"`
-	}
-	if err := decode(c, &req); err != nil || req.RefreshToken == "" {
-		writeErr(c, http.StatusBadRequest, errors.New("refreshToken required"))
-		return
-	}
-	e, err := s.Auth.Lookup(c.Request.Context(), req.RefreshToken)
-	if err != nil {
-		writeErr(c, http.StatusUnauthorized, errors.New("invalid refresh token, please login again"))
-		return
-	}
-	if e.Kind != store.AuthKindUser {
-		writeErr(c, http.StatusUnauthorized, errors.New("invalid refresh token, please login again"))
-		return
-	}
-	// UserID=0 哨兵 = 超管凭证（仅管理端口；纪元在重签时嵌入当前值——口令轮换/
-	// 文件重置后 PUT /admin/super 已 RevokeUser(0) 三层清空，走到这里即有效凭据）。
-	if e.UserID == store.SuperAdminID {
-		if !c.GetBool(adminModeKey) || s.Super == nil {
-			writeErr(c, http.StatusForbidden, errors.New("管理员账号请使用服务端管理界面登录"))
-			return
-		}
-		at, rt, err := s.issueSuperSession(c.Request.Context())
-		if err != nil {
-			writeErr(c, http.StatusInternalServerError, err)
-			return
-		}
-		_ = s.Auth.Revoke(c.Request.Context(), req.RefreshToken) // 旧凭证作废（轮换）
-		name, _ := s.Super.Username()
-		writeJSON(c, http.StatusOK, map[string]any{
-			"token":        at,
-			"accessToken":  at,
-			"refreshToken": rt,
-			"expiresIn":    int(s.Cfg.AccessTTLDuration().Seconds()),
-			"user":         userView(&store.User{ID: store.SuperAdminID, Username: name, Role: store.RoleAdmin}),
-		})
-		return
-	}
-	u, err := s.Store.GetUserByID(e.UserID) // 低频端点保留一次现读：档案回显完整 + 删号即拒
-	if err != nil {
-		_ = s.Auth.Revoke(c.Request.Context(), req.RefreshToken)
-		writeErr(c, http.StatusUnauthorized, errors.New("user not found"))
-		return
-	}
-	// 管理员的既有凭证不能在用户端口续期（需求11 规则不变，判据取库内现角色）。
-	if u.Role == store.RoleAdmin && !c.GetBool(adminModeKey) {
-		writeErr(c, http.StatusForbidden, errors.New("管理员账号请使用服务端管理界面登录"))
-		return
-	}
-	at, rt, err := s.issueSession(c.Request.Context(), u)
-	if err != nil {
-		writeErr(c, http.StatusInternalServerError, err)
-		return
-	}
-	_ = s.Auth.Revoke(c.Request.Context(), req.RefreshToken) // 旧凭证作废（轮换）
-	expiresIn := int(s.Cfg.IdleDuration().Seconds())
-	if u.Role == store.RoleAdmin {
-		expiresIn = int(s.Cfg.AccessTTLDuration().Seconds())
-	}
-	writeJSON(c, http.StatusOK, map[string]any{
-		"token":        at,
-		"accessToken":  at,
-		"refreshToken": rt,
-		"expiresIn":    expiresIn,
-		"user":         userView(u),
-	})
-}
+// handleRefresh 已于 0.2.4 移除：活跃滑动续期由 authCtx→Touch 在服务端无感完成
+// （凭证字符串永不轮换），"重新验证才换凭证"即重登语义，/auth/refresh 不再有
+// 存在价值。旧客户端（≤0.3.5）/移动端 401→refresh 链路自然失败后退化为
+// "过期即重登"（登录对话框承接，行为可接受、已在兼容矩阵明示）。
 
-// handleLogout POST /api/v1/auth/logout {refreshToken}
+// handleLogout POST /api/v1/auth/logout {token}（兼容读取旧字段 refreshToken，
+// 供 ≤0.3.5 桌面/移动端尽力而为撤权；两者皆无=本地清理请求，直接 ok）。
 // 撤权三层同步（L1 立删/L2 共享立删/L3 事实源删除；他实例 L1 陈旧 ≤ auth.memTTL）。
 func (s *Server) handleLogout(c *gin.Context) {
 	var req struct {
+		Token        string `json:"token"`
 		RefreshToken string `json:"refreshToken"`
 	}
-	if err := decode(c, &req); err == nil && req.RefreshToken != "" {
-		if err := s.Auth.Revoke(c.Request.Context(), req.RefreshToken); err != nil {
-			log.Printf("auth: warn: logout revoke failed: %v", err) // 旧行为一致：尽力而为，客户端本地一律清除
+	cred := ""
+	if err := decode(c, &req); err == nil {
+		cred = req.Token
+		if cred == "" {
+			cred = req.RefreshToken
+		}
+	}
+	if cred == "" {
+		// 未带 body 凭证时撤销 Authorization 头里正在使用的凭证（本路由要求
+		// 登录态——登出"当前会话"是最常见语义）
+		if h := c.Request.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			cred = strings.TrimPrefix(h, "Bearer ")
+		}
+	}
+	if cred != "" {
+		if err := s.Auth.Revoke(c.Request.Context(), cred); err != nil {
+			log.Printf("auth: warn: logout revoke failed: %v", err) // 尽力而为，客户端本地一律清除
 		}
 	}
 	writeJSON(c, http.StatusOK, map[string]any{"ok": true})
@@ -333,17 +288,19 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 	writeJSON(c, http.StatusOK, map[string]any{"ok": true, "reauthRequired": true})
 }
 
-// handleMe GET /api/v1/auth/me → 当前用户信息。
-// 0.2.3：authCtx 注入的是认证图条目的合成用户（不含 allowedRoots/createdAt
-// 档案字段）——账户页低频，直达库取完整档案回显（形状与旧版逐字段一致）。
+// handleMe GET /api/v1/auth/me → **仅回 {"username"}（0.2.4 收敛）**。
+// 客户端只持 token、不查询自身身份：角色/权限全在服务端认证图内判给（jail/ACL），
+// 客户端 UI 永不需要 role；档案字段（id/role/allowedRoots/createdAt）不再对外
+// （roots 端点本就给出可访问目录清单，是业务数据而非身份）。不查库——用户名取自
+// 认证图条目；旧客户端读取 role 的分支自然落默认值（桌面 0.3.5 显示"普通用户"、
+// 移动端 MeInfo.role 空串），无害降级。
 func (s *Server) handleMe(c *gin.Context) {
 	u := currentUser(c)
-	if u != nil && u.ID != store.SuperAdminID && s.dbReady() {
-		if fresh, err := s.Store.GetUserByID(u.ID); err == nil {
-			u = fresh
-		}
+	if u == nil {
+		writeErr(c, http.StatusUnauthorized, errors.New("login required"))
+		return
 	}
-	writeJSON(c, http.StatusOK, userView(u))
+	writeJSON(c, http.StatusOK, map[string]any{"username": u.Username})
 }
 
 // handleHealth GET /api/v1/health（公开，balancer 健康检查也依赖它）。

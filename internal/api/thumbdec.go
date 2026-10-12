@@ -25,13 +25,20 @@ import (
 	_ "image/png" // 注册 png 解码
 )
 
-// 解码闸门：超限一律按不支持回退（客户端图标/旧路径兜底），防解码炸弹占满
-// 内存/CPU——12MP ≈ RGBA 48MB/请求 × 并发槽 ≤4 ≈ 200MB 峰值上界。
+// 解码闸门：超限一律按不支持回退（客户端图标——0.2.4 起 Client 0.3.6 浏览
+// **永不整文件下载兜底**），防解码炸弹占满内存/CPU——
+//   - PNG/GIF/BMP：RGBA 全幅解码，12MP ≈ 48MB/请求 × 并发槽 ≤4 ≈ 200MB 峰值上界；
+//   - JPEG（含 RAW 内嵌预览）：0.2.4 起走 YCbCr 平面直接降采样（1.5B/px，
+//     无全幅 RGBA 中间层），闸门提至 **50MP/9000px**——48MP 手机主摄/常见单反
+//     原图也能出服务端小缩略图（几十 KB），浏览不再因像素闸门落图标；
+//     峰值上界 = 平面 ≤75MB + 输入文件 ≤64MiB ≈ 139MB/槽 × 4。
 const (
-	thumbMaxFileBytes = 64 << 20 // 输入文件字节上限（413 判定同值）
-	thumbMaxPixels    = 12_000_000
-	thumbMaxSideIn    = 6000
-	thumbQuality      = 80
+	thumbMaxFileBytes  = 64 << 20 // 输入文件字节上限（413 判定同值）
+	thumbMaxPixels     = 12_000_000
+	thumbMaxSideIn     = 6000
+	thumbMaxPixelsJpeg = 50_000_000 // JPEG/RAW 平面路径专用（见上注释）
+	thumbMaxSideJpeg   = 9000
+	thumbQuality       = 80
 )
 
 var errThumbUnsupported = errors.New("thumbnail: unsupported image")
@@ -148,9 +155,8 @@ func extractEmbeddedJPEG(buf []byte) []byte {
 // bmp 走内置解码器（标准库无 BMP 解码，0.2.2 对齐客户端本地缩放能力），
 // 其余经 image.Decode 注册表。闸门：尺寸超限或解码失败 → errThumbUnsupported。
 func decodeScaleJPEG(data []byte, maxSide int, ext string) ([]byte, error) {
-	var img image.Image
-	var err error
-	if ext == "bmp" {
+	switch ext {
+	case "bmp":
 		w, h, cerr := bmpDimensions(data)
 		if cerr != nil {
 			return nil, errThumbUnsupported
@@ -158,8 +164,18 @@ func decodeScaleJPEG(data []byte, maxSide int, ext string) ([]byte, error) {
 		if w <= 0 || h <= 0 || w*h > thumbMaxPixels || w > thumbMaxSideIn || h > thumbMaxSideIn {
 			return nil, errThumbUnsupported
 		}
-		img, err = decodeBMP(data)
-	} else {
+		img, err := decodeBMP(data)
+		if err != nil || img == nil {
+			return nil, errThumbUnsupported
+		}
+		return encodeThumb(img, maxSide)
+	case "jpg", "jpeg":
+		return decodeScaleJPEGPlane(data, maxSide)
+	default:
+		if isRawExt(ext) { // 调用方已把 data 换成内嵌最大完整 JPEG 预览
+			return decodeScaleJPEGPlane(data, maxSide)
+		}
+		// PNG/GIF：RGBA 全幅解码路径，12MP/6000px 闸门（不变）
 		cfg, _, cerr := image.DecodeConfig(bytes.NewReader(data))
 		if cerr != nil {
 			return nil, errThumbUnsupported
@@ -169,18 +185,178 @@ func decodeScaleJPEG(data []byte, maxSide int, ext string) ([]byte, error) {
 			cfg.Width > thumbMaxSideIn || cfg.Height > thumbMaxSideIn {
 			return nil, errThumbUnsupported
 		}
-		img, _, err = image.Decode(bytes.NewReader(data))
+		img, _, err := image.Decode(bytes.NewReader(data))
+		if err != nil || img == nil {
+			return nil, errThumbUnsupported
+		}
+		return encodeThumb(img, maxSide)
 	}
+}
+
+// decodeScaleJPEGPlane JPEG/RAW 内嵌预览专用（0.2.4）：jpeg.Decode 常规输出为
+// *image.YCbCr（基线/渐进、4:4:4·4:2:2·4:2:0…）或 *image.Gray（灰度），
+// 平面盒式降采样全程 ~1.5B/px、无全幅 RGBA 中间层——50MP/9000px 高闸门
+// 覆盖 48MP 手机主摄原图（旧 12MP 闸门把它们整批打回 415→客户端图标）。
+// 异常形态（CMYK→RGBA 等）保守按 12MP 处理，超出直接 415（解码已发生的
+// 内存代价由 64MiB 输入闸门封顶）。
+func decodeScaleJPEGPlane(data []byte, maxSide int) ([]byte, error) {
+	cfg, cerr := jpeg.DecodeConfig(bytes.NewReader(data))
+	if cerr != nil {
+		return nil, errThumbUnsupported
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 ||
+		cfg.Width*cfg.Height > thumbMaxPixelsJpeg ||
+		cfg.Width > thumbMaxSideJpeg || cfg.Height > thumbMaxSideJpeg {
+		return nil, errThumbUnsupported
+	}
+	img, err := jpeg.Decode(bytes.NewReader(data))
 	if err != nil || img == nil {
 		return nil, errThumbUnsupported
 	}
+	switch m := img.(type) {
+	case *image.YCbCr:
+		small, ok := downscaleYCbCr(m, maxSide)
+		if !ok {
+			return nil, errThumbUnsupported
+		}
+		return encodeJPEG(small)
+	case *image.Gray:
+		small, ok := downscaleGray(m, maxSide)
+		if !ok {
+			return nil, errThumbUnsupported
+		}
+		return encodeJPEG(small)
+	default:
+		b := img.Bounds()
+		if b.Dx()*b.Dy() > thumbMaxPixels || b.Dx() > thumbMaxSideIn || b.Dy() > thumbMaxSideIn {
+			return nil, errThumbUnsupported
+		}
+		return encodeThumb(img, maxSide)
+	}
+}
+
+// encodeThumb 通用链路（RGBA 中间层）：scaleToFit 迭代盒式 + 末端双线性，
+// 透明合成白底后编码 JPEG。
+func encodeThumb(img image.Image, maxSide int) ([]byte, error) {
 	small := scaleToFit(img, maxSide)
 	out := flattenJPEG(small) // 透明合成白底 + RGBA 规范化
+	return encodeJPEG(out)
+}
+
+func encodeJPEG(out image.Image) ([]byte, error) {
 	var enc bytes.Buffer
 	if err := jpeg.Encode(&enc, out, &jpeg.Options{Quality: thumbQuality}); err != nil {
 		return nil, err
 	}
 	return enc.Bytes(), nil
+}
+
+// downscaleYCbCr YCbCr 平面盒式降采样直出小 RGBA：Y=盒整数均值，Cb/Cr=盒中心
+// 采样（子采样平面本就平滑，缩略图无差别）。所有下标由 Rect/Stride 整数映射
+// 得出并带越界守卫（畸形平面不 panic）。ok=false=几何非法。
+func downscaleYCbCr(src *image.YCbCr, maxSide int) (*image.RGBA, bool) {
+	b := src.Bounds()
+	sw, sh := b.Dx(), b.Dy()
+	if sw <= 0 || sh <= 0 || maxSide <= 0 {
+		return nil, false
+	}
+	tw, th := targetSide(sw, sh, maxSide)
+	dst := image.NewRGBA(image.Rect(0, 0, tw, th))
+	for oy := 0; oy < th; oy++ {
+		sy0 := b.Min.Y + oy*sh/th
+		sy1 := b.Min.Y + (oy+1)*sh/th
+		if sy1 <= sy0 {
+			sy1 = sy0 + 1
+		}
+		for ox := 0; ox < tw; ox++ {
+			sx0 := b.Min.X + ox*sw/tw
+			sx1 := b.Min.X + (ox+1)*sw/tw
+			if sx1 <= sx0 {
+				sx1 = sx0 + 1
+			}
+			var sum, cnt uint64
+			for sy := sy0; sy < sy1 && sy < b.Max.Y; sy++ {
+				base := src.YOffset(b.Min.X, sy)
+				if base < 0 || base+sw > len(src.Y) {
+					continue
+				}
+				row := src.Y[base : base+sw]
+				for sx := sx0; sx < sx1 && sx < b.Max.X; sx++ {
+					sum += uint64(row[sx-b.Min.X])
+					cnt++
+				}
+			}
+			if cnt == 0 {
+				return nil, false
+			}
+			ci := src.COffset((sx0+sx1)/2, (sy0+sy1)/2)
+			var cbv, crv uint8 = 128, 128 // 越界取中性色（保守出图不 panic）
+			if ci >= 0 && ci < len(src.Cb) && ci < len(src.Cr) {
+				cbv, crv = src.Cb[ci], src.Cr[ci]
+			}
+			r, g, bl, _ := color.YCbCr{Y: uint8(sum / cnt), Cb: cbv, Cr: crv}.RGBA()
+			dst.SetRGBA(ox, oy, color.RGBA{uint8(r >> 8), uint8(g >> 8), uint8(bl >> 8), 0xff})
+		}
+	}
+	return dst, true
+}
+
+// downscaleGray 灰度 JPEG 同款（无色度平面）。
+func downscaleGray(src *image.Gray, maxSide int) (*image.RGBA, bool) {
+	b := src.Bounds()
+	sw, sh := b.Dx(), b.Dy()
+	if sw <= 0 || sh <= 0 || maxSide <= 0 {
+		return nil, false
+	}
+	tw, th := targetSide(sw, sh, maxSide)
+	dst := image.NewRGBA(image.Rect(0, 0, tw, th))
+	for oy := 0; oy < th; oy++ {
+		sy0 := b.Min.Y + oy*sh/th
+		sy1 := b.Min.Y + (oy+1)*sh/th
+		if sy1 <= sy0 {
+			sy1 = sy0 + 1
+		}
+		for ox := 0; ox < tw; ox++ {
+			sx0 := b.Min.X + ox*sw/tw
+			sx1 := b.Min.X + (ox+1)*sw/tw
+			if sx1 <= sx0 {
+				sx1 = sx0 + 1
+			}
+			var sum, cnt uint64
+			for sy := sy0; sy < sy1 && sy < b.Max.Y; sy++ {
+				base := sy*src.Stride + b.Min.X
+				if base < 0 || base+sw > len(src.Pix) {
+					continue
+				}
+				row := src.Pix[base : base+sw]
+				for sx := sx0; sx < sx1 && sx < b.Max.X; sx++ {
+					sum += uint64(row[sx-b.Min.X])
+					cnt++
+				}
+			}
+			if cnt == 0 {
+				return nil, false
+			}
+			gv := uint8(sum / cnt)
+			dst.SetRGBA(ox, oy, color.RGBA{gv, gv, gv, 0xff})
+		}
+	}
+	return dst, true
+}
+
+// targetSide 长边缩到 ≤maxSide 的目标尺寸（与 scaleToFit 同一取整规则；
+// 已够小则 1:1 输出，绝不放大）。
+func targetSide(sw, sh, maxSide int) (int, int) {
+	tw, th := maxSide, maxSide
+	if sw >= sh {
+		th = fitSide(sh, sw, maxSide)
+	} else {
+		tw = fitSide(sw, sh, maxSide)
+	}
+	if sw <= tw && sh <= th {
+		tw, th = sw, sh
+	}
+	return tw, th
 }
 
 // ---------- BMP 解码（0.2.2，纯标准库自实现） ----------

@@ -8,7 +8,7 @@ FileManage 体系的服务端（gin 提供 REST API，统一 `/api/v1`）：不�
 可选 redis 缓存；未配置数据库时默认内置 `file` 文件存储、全功能可用——单实例 flock，见 0.1.1），
 store 层为工程内建（独立工程 filemanageDb 已并入、不再存在）。
 
-当前版本：**0.2.3**（产物版本由 git tag 经 `-ldflags` 注入 `internal/version`，见 `CHANGELOG.md`）
+当前版本：**0.2.4**（产物版本由 git tag 经 `-ldflags` 注入 `internal/version`，见 `CHANGELOG.md`）
 
 ## 快速开始（Get Start）
 
@@ -107,7 +107,7 @@ store 层为工程内建（独立工程 filemanageDb 已并入、不再存在）
   "trashRetentionDays": 30,              // 回收站自动清理（需求4）
   "uploadStagingDir": "",                // 分片上传暂存
   "versions": { "enabled": true, "maxVersions": 10, "dir": "" },
-  "session": { "accessTTL": "1h", "idleDays": 21 },   // 管理台会话绝对时长 / 用户凭证滑动窗口（需求22，0.2.3 语义微调）
+  "session": { "accessTTL": "1h", "idleMinutes": 60, "idleDays": 21 },   // 管理台会话绝对时长 / 用户凭证滑动窗口（需求22；0.2.4 起 idleMinutes 优先、默认 1h，idleDays 弃用回退）
   // 三层认证图（0.2.3，需求2）：L1 进程内 LRU 上限与新鲜期 / L2 redis 条目上限 / 清扫与续期写回节奏
   "auth": { "memMaxEntries": 200000, "memTTL": "5m", "redisMaxEntries": 5000000,
             "sweepInterval": "10m", "touchWriteEvery": "10m" },
@@ -150,8 +150,8 @@ trashDir、uploadStagingDir，以及 **`<dataDir>/Users`（用户文件与
 
 | 分组 | 端点 |
 |---|---|
-| 认证 | `auth/login` `auth/refresh` `auth/logout` `auth/me` `auth/change-password`（0.1.0 自助改密；`auth/register` 引导注册已移除） |
-| 浏览（可匿名，只读） | `roots` `files` `stat` `search`（名称/类型/大小/时间） `thumb`（0.2.1 服务端缩略图，守卫/匿名语义同 `preview`；格式白名单 jpeg/png/gif/RAW，0.2.2 起补 bmp——常见 BI_RGB/BI_BITFIELDS/RLE 子集，纯标准库解码；其余格式 415 由客户端回退） |
+| 认证 | `auth/login`（0.2.4 起请求 `{username,password,clientId?}`，用户端口响应只 `{token}`；管理台端口另回 `user` 概要） `auth/logout` `{token}` `auth/me`（0.2.4 起仅回 `{username}`——客户端不查询身份/角色） `auth/change-password`（0.1.0 自助改密；`auth/register` 引导注册、0.2.4 `auth/refresh` 已移除） |
+| 浏览（可匿名，只读） | `roots` `files` `stat` `search`（名称/类型/大小/时间） `thumb`（0.2.1 服务端缩略图，守卫/匿名语义同 `preview`；格式白名单 jpeg/png/gif/RAW，0.2.2 起补 bmp——常见 BI_RGB/BI_BITFIELDS/RLE 子集，纯标准库解码；0.2.4 起 jpeg/RAW 走 YCbCr 平面路径（50MP/9000px 闸门，手机大原图也出图），其余格式 415=客户端图标） |
 | 文件（需登录+ACL） | `mkdir` `mkdirs`（0.2.0 批量建目录，需求41 目录上传） `rename` `move` `copy` `delete` |
 | 传输 | `download` `preview`（Range+限速） `upload`（兼容） `upload/session` `upload/chunk` `upload/complete`（分片/断点续传/并发保护） `check`（0.2.1 目录重传批量校验 missing/same/differ/unknown） |
 | 回收站 | `trash` `trash/restore` `trash/remove` `trash/clear`（30 天自动清理） |
@@ -183,7 +183,7 @@ deploy/                  Docker / compose / nginx 样例
 
 ## 版本兼容
 
-见 `CHANGELOG.md` 兼容矩阵。当前基线：**Server 0.2.x（0.2.3）↔ Client 0.3.x
-（推荐 0.3.4）**——0.2.3 认证重构后 `/api/v1` 字段形状零变更，旧客户端 ≤0.3.3 登录/刷新/
+见 `CHANGELOG.md` 兼容矩阵。当前基线：**Server 0.2.x（0.2.4）↔ Client 0.3.x
+（推荐 0.3.6）**——0.2.4 认证收敛（登录只回 `{token}`、refresh 删除、绑定会话查 `X-Client-Id` 头、滑动窗口 1h）为破坏批，旧客户端 ≤0.3.5 登录/刷新/
 分享/管理台全链路兼容（升级后存量令牌一次性失效、重登一次）。元数据层自含（无独立
 Db 工程）；旧配置启动时按 schemaVersion 自动迁移（当前链至 v9）。

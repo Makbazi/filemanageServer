@@ -77,12 +77,17 @@ func (s *sqlStore) Close() error {
 	return raw.Close()
 }
 
-// Migrate 执行幂等建表 DDL（不 AutoMigrate，保持已发布表字节兼容）。
+// Migrate 执行幂等建表 DDL（不 AutoMigrate，保持已发布表字节兼容），随后执行
+// 方言加列守卫（0.2.4 auth_sessions.client_id，见 dialect.extra 注释——只增
+// 不改，存量 0.2.3 库自动补列，新库 CREATE 清单已含）。
 func (s *sqlStore) Migrate() error {
 	for _, q := range s.d.ddl {
 		if err := s.db.Exec(q).Error; err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
+	}
+	if s.d.extra != nil {
+		return s.d.extra(s.db)
 	}
 	return nil
 }

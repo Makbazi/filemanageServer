@@ -99,15 +99,15 @@ func (s *Server) handleAdminPutSuper(c *gin.Context) {
 		who = "password"
 	}
 	s.audit(c, store.AuditSuperUpdate, acct.Username, store.SuperAdminID, "", "", "superadmin account updated: "+who)
+	// 0.2.4 响应收敛：accessToken/expiresIn 别名删除（管理台只读 token/username，
+	// 见 app.js saveSuper），保留 user 概要之外的管理面自有字段。
 	writeJSON(c, http.StatusOK, map[string]any{
-		"ok":          true,
-		"username":    acct.Username,
-		"plaintext":   !isHashedPassword(acct.Password),
-		"token":       at,
-		"accessToken": at,
-		"expiresIn":   int(s.Cfg.AccessTTLDuration().Seconds()),
-		"updatedAt":   acct.UpdatedAt.Format(time.RFC3339),
-		"notice":      "口令已以明文写入账户文件，首次成功登录后自动转密文",
+		"ok":        true,
+		"username":  acct.Username,
+		"plaintext": !isHashedPassword(acct.Password),
+		"token":     at,
+		"updatedAt": acct.UpdatedAt.Format(time.RFC3339),
+		"notice":    "口令已以明文写入账户文件，首次成功登录后自动转密文",
 	})
 }
 

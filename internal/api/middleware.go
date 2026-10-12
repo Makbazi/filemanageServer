@@ -90,6 +90,15 @@ func (s *Server) authCtx() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		// 0.2.4 客户端绑定核对：登录时携带 clientId 签发的凭证与该标识绑定，
+		// 逐请求 X-Client-Id 必须等值——缺失/不符=401（标识变了或是被冒用，
+		// 一律重新登录取新凭证）。未绑定会话（旧客户端/移动端/管理台，
+		// ClientID=""）不看头，行为同前；多客户端同账号各持己凭证互不挤占。
+		if e.ClientID != "" && c.Request.Header.Get("X-Client-Id") != e.ClientID {
+			writeErr(c, http.StatusUnauthorized, errors.New("client identity mismatch, please login again"))
+			c.Abort()
+			return
+		}
 		if e.Super {
 			if s.Super == nil { // 防御：未装配超管（仅测试构造可为 nil）
 				writeErr(c, http.StatusUnauthorized, errors.New("superadmin not configured"))
