@@ -2,3 +2,5 @@
 .claude
 .claude
 build/
+data/
+t.pid
