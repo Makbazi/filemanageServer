@@ -10,7 +10,8 @@
 
 | filemanageServer | 元数据存储 | 兼容 filemanageClient |
 |---|---|---|
-| 0.2.x（当前 **0.2.3**） | 自含（同 0.1.x；0.2.3 认证重构：新表 `auth_sessions`（幂等增量，四方言+file 驱动）、配置 schemaVersion 8→9（auth 段）、`golang-jwt` 依赖移除；旧 `sessions` 表冻结不再读写但保留磁盘兼容） | **Client 0.3.4 推荐基线**（认证协议字段形状零变更，0.3.4 与 0.1.x–0.3.3 全部客户端登录/刷新/分享/管理台全链路可用）；**一次性代价**：升级到本版本后所有既有 JWT 访问令牌/refresh 令牌/分享 st 令牌失效，各账户重新登录一次（此后行为与旧客户端完全一致）|
+| 0.2.x（当前 **0.2.4**） | 自含（同 0.2.3；0.2.4 认证收敛：`auth_sessions` 加列 `client_id`（四方言 CREATE 含列 + 存量库幂等加列守卫，只增不改）、配置 schemaVersion 9→10（session.idleMinutes=60，滑动窗口 21 天→1 小时）；0.2.3 的 `auth_sessions` 表/auth 段/去 JWT 沿用） | **Client 0.3.6 推荐基线（认证破坏批）**：用户端口登录只回 `{token}`、`/auth/refresh` 移除、绑定会话逐请求核对 `X-Client-Id`——0.3.6 配套（单凭证/自动重登/退出登出/浏览零整文件）。旧客户端 0.1.x–0.3.5 与移动端**可用但降级**（会话未绑定不查头；无 refreshToken 回显走"过期即重登"；refresh 401/404 退化重登；窗口同降 1h）。管理台内嵌前端兼容（保留 `{token,user}`）；`GET /thumb` JPEG/RAW 出图面提至 50MP/9000px（对一切客户端纯增益）|
+| 0.2.3 | 自含（同 0.1.x；0.2.3 认证重构：新表 `auth_sessions`（幂等增量，四方言+file 驱动）、配置 schemaVersion 8→9（auth 段）、`golang-jwt` 依赖移除；旧 `sessions` 表冻结不再读写但保留磁盘兼容） | Client 0.3.4（推荐位由 0.3.6 取代；认证协议字段形状零变更，0.1.x–0.3.4 登录/刷新/分享/管理台全链路可用）；**一次性代价**：升级到该版本时所有既有 JWT/refresh/分享 st 令牌失效，重登一次 |
 | 0.2.2 | 自含（同 0.1.x；仅 `GET /thumb` 白名单扩 BMP（thumbdec.go 纯标准库自实现），无新端点/新表/新列、schemaVersion 保持 8） | Client 0.3.3（服务端网格 BMP 出图=本地缩放机制）；Client 0.3.2/0.2.x 无感可用且 BMP 由 415 变 200 为纯增益面（旧客户端 size_hint 回退语义不变）；Client 0.1.x 及以下同 |
 | 0.2.1 | 自含（同 0.1.x；纯 API 面加性 `GET /thumb`+`POST /check` 与静默修复，无新表/新列、schemaVersion 保持 8） | **Client 0.3.2 完整功能（浏览零下载+目录重传预检依赖本版本端点）**；Client 0.2.0/0.3.x 早期版本全功能无感（不调用新端点即无感）；Client 0.1.x 及以下同 |
 | 0.2.0 | 自含（同 0.1.x；纯 API 面增项 `POST /api/v1/mkdirs`） | **Client 0.2.0 完整功能（目录上传）**；Client 0.1.x 及以下全功能无感（mkdirs 为加性端点，旧客户端不调用） |
@@ -42,6 +43,66 @@
   版本号落到 `"unknown"`。设 `FM_VERSION=x.y.z ./build.sh -a all` 可跳过 git 推导固定版本
   （此时也不追加 `-dirty`）；亦可在流水线先 `git fetch --tags --force`（浅克隆加
   `--unshallow`）并 `git config --global --add safe.directory "$WORKSPACE"` 让 tag 真正可用。
+
+## [0.2.4] - 2026-10-12（认证响应面收敛：单凭证 + 客户端唯一标识绑定 + 1h 滑动窗口；缩略图 JPEG 出图面扩至 50MP；用户 2026-10-12 清单第 2/3 条；tag 由维护者打）
+
+### 破坏性变更（认证契约；未发布系列经维护者确认直接修改 /api/v1，本批版本线 Server 0.2.4 ↔ Client 0.3.6）
+- `POST /api/v1/auth/login` 用户端口响应**只回 `{"token"}`**：删除 accessToken/refreshToken/
+  expiresIn 兼容别名与 user 概要回显——身份/角色/有效期全存服务端认证图（需求34"身份隐藏
+  贯彻到凭证层"的最终形态；客户端对凭证从无格式假设）。管理台登录（admin 端口，
+  adminModeKey）保留 `{"token","user"}`——控制台进入门禁与顶栏依赖 user.role（维护者确认：
+  仅裁客户端面）。`PUT /admin/super` 响应同步删除 accessToken/expiresIn 别名（控制台只读
+  token/username）。`GET /auth/me` 收敛为仅回 `{username}`——角色/档案（id/role/
+  allowedRoots/createdAt）不再对客户端可见：客户端只持 token，可查询的仅服务端基本信息
+  （health/版本发现）与业务数据（roots 清单），身份与权限判定完全在服务端认证图+jail 内
+  闭环；旧客户端/移动端读取 role 的分支落各自默认值，无害降级（桌面 ≤0.3.5 恒显「普通
+  用户」、移动端 MeInfo.role 空串且解析全带缺省不崩；Client 0.3.6 起账户页不再调用本端点）。
+- **移除 `POST /auth/refresh`**（路由删除，请求落 404）：活跃滑动续期由服务端无感完成
+  （authCtx→Touch，续期过程中凭证字符串永不变化），"重新验证才换凭证"即重登语义。
+  旧客户端（≤0.3.5）与移动端既有 401→refresh 链路自然失败后**退化为"过期即重登"**
+  （登录对话框承接，无新增协议面）。
+- **客户端唯一标识（client ID）绑定**：登录请求新增可选 `clientId`（≤64 字符，超长 400）；
+  `auth_sessions` 新增列 `client_id` 持久化（四方言 CREATE 含列；存量 0.2.3 库 `Migrate()` 后
+  幂等加列守卫——sqlite `PRAGMA table_info` 探查后 ALTER、mysql information_schema 探查后
+  ALTER、pg `ADD COLUMN IF NOT EXISTS`；file 驱动 JSON 行天然加性，旧行解出空串=未绑定）。
+  绑定会话**逐请求核对 `X-Client-Id` 头**：缺失/不符=401（须重新登录）。未绑定会话
+  （旧客户端/移动端/管理台/超管——登录未带 clientId）不看头，行为同前。多客户端同账号
+  各持己凭证**互不挤占**（登录从不吊销其他会话——既有语义保持并明示）。
+- **用户会话滑动窗口 21 天 → 1 小时**：配置新增 `session.idleMinutes`（默认 60）；
+  `IdleDuration()` IdleMinutes>0 优先、否则回退弃用字段 idleDays。**schemaVersion 9→10**
+  （migrate9to10 只补缺不覆盖、配置备份纪律沿用）。闲置超 1h、或客户端主动登出/正常退出
+  （Client 0.3.6 退出前尽力 logout）均需重新登录；管理台/超管绝对 accessTTL 1h 不滑动不变。
+  `POST /auth/logout` 接受 `{token}`（兼容读取旧字段 refreshToken；两者皆无则撤销
+  Authorization 头中的当前凭证——路由本要求登录态）。
+
+### 修复/改进（缩略图面：配合 Client 0.3.6"浏览零整文件"，服务端出图能力扩展）
+- thumbdec.go JPEG（含相机 RAW 内嵌预览）改走 **YCbCr 平面盒式直降采样**（Y=盒整数均值、
+  色度=盒中心采样、灰度直出；无全幅 RGBA 中间层，~1.5B/px）：专用闸门
+  **`thumbMaxPixelsJpeg=50MP` / `thumbMaxSideJpeg=9000px`**——48MP 手机主摄原图直接拿到
+  几十 KB 服务端缩略图（旧 12MP 闸门令其整批 415，被客户端当作"整文件静默下载兜底"触发
+  浏览带宽爆满——本批用户清单第 2 条的服务侧治本项）。PNG/GIF/BMP 维持 RGBA 链路
+  12MP/6000px；CMYK 等异常 JPEG 形态保守按 12MP；415/413/404 响应语义不变（Client
+  0.3.6 一律落图标）。解码峰值明示：JPEG ≈ 平面 75MB+输入 64MiB/slot、PNG/GIF/BMP ≈
+  48MB/slot，并发槽 ≤4。
+
+### 验证
+- `go build ./... && go vet ./...` ✓、gofmt 干净。
+- 冒烟（file + sqlite3 双引擎）：v9→v10 迁移补 `session.idleMinutes=60` ✓；用户端口登录
+  仅 `{token}` ✓；管理台登录 `{token,user}` ✓；绑定凭证 正确头 200 / 缺头 401 / 错头 401，
+  未绑定会话不查头 200 ✓；同账号两凭证并存互不吊销 ✓；logout 撤销当前凭证后 401、
+  其他会话不受影响 ✓；`/auth/refresh` 404 ✓；存量无 client_id 列的 sqlite3 库启动自动
+  补列、新登录落列值 ✓；24MP JPEG `GET /thumb` 200（512px ≈60KB）、15MP PNG 415、
+  `w=1024` 出图 ✓。
+
+### 兼容
+- **Client 0.3.6 为本批完整语义推荐基线**（单凭证存取/标识绑定/401 自动重登/退出登出/
+  浏览零整文件均为配套客户端行为）。旧客户端 0.1.x–0.3.5 与移动端**可用但降级**：不送
+  clientId（会话未绑定、不查头）、登录响应无 refreshToken（其既有"无 rt 即过期重登"分支
+  承接）、refresh 端点消失（401→重登）、滑动窗口同样缩至 1h（服务端策略统一生效）。
+  升级一次性代价：存量会话沿用（未绑定、随新策略到期节奏）；管理台内嵌前端与本版形状
+  兼容（仅读 token/username）。
+
+
 
 ## [0.2.3] - 2026-10-09（认证重构：去 JWT，服务端三层认证图；本批用户清单第 2 条；tag 由维护者打）
 

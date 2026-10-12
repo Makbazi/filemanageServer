@@ -11,11 +11,11 @@ import (
 // CurrentSchema 当前配置 schema 版本。
 // 每次配置结构发生不兼容变化时 +1，并在下方追加对应迁移函数（需求25：
 // 服务端安全升级——旧配置文件自动迁移、原文件备份、未知字段保留）。
-const CurrentSchema = 9
+const CurrentSchema = 10
 
-// MigrateMap 对通用 map 形式的配置执行迁移链 v1→…→v8→v9，返回是否发生变化。
+// MigrateMap 对通用 map 形式的配置执行迁移链 v1→…→v9→v10，返回是否发生变化。
 // 缺失 schemaVersion 的旧配置视为 v1（v1–v7 为基线前内部迭代、从未发布；
-// v8 自 0.1.0 起、v9 自 0.2.3 起）。
+// v8 自 0.1.0 起、v9 自 0.2.3 起、v10 自 0.2.4 起）。
 func MigrateMap(m map[string]any) (bool, error) {
 	ver := 1
 	if v, ok := m["schemaVersion"].(float64); ok && v > 0 {
@@ -51,6 +51,9 @@ func MigrateMap(m map[string]any) (bool, error) {
 		case 8:
 			changed = migrate8to9(m) || changed
 			ver = 9
+		case 9:
+			changed = migrate9to10(m) || changed
+			ver = 10
 		default:
 			return changed, fmt.Errorf("no migration path from schemaVersion %d", ver)
 		}
@@ -191,6 +194,23 @@ func migrate8to9(m map[string]any) bool {
 	if _, ok := m["auth"]; !ok {
 		m["auth"] = map[string]any{"memMaxEntries": 200000, "memTTL": "5m",
 			"redisMaxEntries": 5000000, "sweepInterval": "10m", "touchWriteEvery": "10m"}
+		return true
+	}
+	return false
+}
+
+// migrate9to10 v9（0.2.3）→ v10（0.2.4）：session 段新增 idleMinutes——客户端
+// 用户会话滑动闲置窗口收敛为 **60 分钟**（需求22 微调：活跃即无感续命，1h 无
+// 活动需重新登录；凭证字符串在续期中不变）。只补缺不覆盖；idleDays 保留为
+// 弃用字段（IdleMinutes>0 时不参与判定），存量显式设置不被改写。
+func migrate9to10(m map[string]any) bool {
+	sess, ok := m["session"].(map[string]any)
+	if !ok {
+		m["session"] = map[string]any{"accessTTL": "1h", "idleDays": 21, "idleMinutes": 60}
+		return true
+	}
+	if _, ok := sess["idleMinutes"]; !ok {
+		sess["idleMinutes"] = 60
 		return true
 	}
 	return false

@@ -14,23 +14,27 @@ import (
 	"strings"
 
 	"github.com/go-sql-driver/mysql"
+	"gorm.io/gorm"
 )
 
 type dialect struct {
 	name     string   // 规范驱动名（Driver() 返回值）
 	ddl      []string // Migrate() 执行的幂等建表语句
 	seqReset []string // 跨库复制后的序列对齐（仅 pg；见 copy.go），sqlite/mysql 为 nil
+	// extra Migrate() 在 ddl 清单之后执行的幂等加列守卫（0.2.4：
+	// auth_sessions.client_id；只增不改，见各 dialect_*.go 注释），nil=无。
+	extra func(db *gorm.DB) error
 }
 
 // newDialect 按规范驱动名（NormalizeDriver 的输出）构造方言。
 func newDialect(name string) (*dialect, error) {
 	switch name {
 	case DriverSQLite:
-		return &dialect{name: DriverSQLite, ddl: sqliteDDL()}, nil
+		return &dialect{name: DriverSQLite, ddl: sqliteDDL(), extra: sqliteEnsureExtra}, nil
 	case DriverMySQL:
-		return &dialect{name: DriverMySQL, ddl: mysqlDDL()}, nil
+		return &dialect{name: DriverMySQL, ddl: mysqlDDL(), extra: mysqlEnsureExtra}, nil
 	case DriverPg:
-		return &dialect{name: DriverPg, ddl: pgDDL(), seqReset: pgSeqReset()}, nil
+		return &dialect{name: DriverPg, ddl: pgDDL(), seqReset: pgSeqReset(), extra: pgEnsureExtra}, nil
 	}
 	return nil, fmt.Errorf("store: no dialect for driver %q", name)
 }

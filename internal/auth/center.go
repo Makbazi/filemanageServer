@@ -61,8 +61,10 @@ type Spec struct {
 	Super    bool
 	Gen      int64  // 超管凭据纪元（authCtx 逐请求核对）
 	Ref      string // share：绑定的链接 token
-	TTL      time.Duration
-	Persist  bool // false=仅 L1(+L2)：降级模式超管登录（对齐旧行为，重启即失效）
+	ClientID string // 0.2.4：客户端唯一标识（kind=user 且非空=绑定，逐请求核对
+	// X-Client-Id 头；空=未绑定——旧客户端/移动端/管理台会话）
+	TTL     time.Duration
+	Persist bool // false=仅 L1(+L2)：降级模式超管登录（对齐旧行为，重启即失效）
 }
 
 // Center 认证中心。对外方法均并发安全；锁只护 L1 纯内存操作，所有 I/O 在锁外。
@@ -105,6 +107,7 @@ type wireEntry struct {
 	Super      bool      `json:"super"`
 	Gen        int64     `json:"gen"`
 	Ref        string    `json:"ref"`
+	ClientID   string    `json:"clientId"`
 	ExpiresAt  time.Time `json:"expiresAt"`
 	LastUsedAt time.Time `json:"lastUsedAt"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -112,13 +115,13 @@ type wireEntry struct {
 
 func toWire(e *store.AuthSession) wireEntry {
 	return wireEntry{ID: e.ID, Kind: e.Kind, UserID: e.UserID, Username: e.Username,
-		Role: e.Role, Super: e.Super, Gen: e.Gen, Ref: e.Ref,
+		Role: e.Role, Super: e.Super, Gen: e.Gen, Ref: e.Ref, ClientID: e.ClientID,
 		ExpiresAt: e.ExpiresAt, LastUsedAt: e.LastUsedAt, CreatedAt: e.CreatedAt}
 }
 
 func (w wireEntry) session(hash string) *store.AuthSession {
 	return &store.AuthSession{ID: w.ID, Kind: w.Kind, UserID: w.UserID, Username: w.Username,
-		Role: w.Role, Super: w.Super, Gen: w.Gen, Ref: w.Ref, TokenHash: hash,
+		Role: w.Role, Super: w.Super, Gen: w.Gen, Ref: w.Ref, ClientID: w.ClientID, TokenHash: hash,
 		ExpiresAt: w.ExpiresAt, LastUsedAt: w.LastUsedAt, CreatedAt: w.CreatedAt}
 }
 
@@ -320,7 +323,7 @@ func (c *Center) Issue(ctx context.Context, sp Spec) (string, error) {
 	}
 	now := time.Now()
 	e := &store.AuthSession{Kind: sp.Kind, UserID: sp.UserID, Username: sp.Username,
-		Role: sp.Role, Super: sp.Super, Gen: sp.Gen, Ref: sp.Ref, TokenHash: hash,
+		Role: sp.Role, Super: sp.Super, Gen: sp.Gen, Ref: sp.Ref, ClientID: sp.ClientID, TokenHash: hash,
 		ExpiresAt: now.Add(sp.TTL), LastUsedAt: now, CreatedAt: now}
 	if sp.Persist {
 		if err := c.st.CreateAuthSession(e); err != nil {

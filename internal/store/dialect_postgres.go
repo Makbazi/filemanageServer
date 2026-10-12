@@ -10,7 +10,11 @@
 // sqlite 对 ASCII 大小写不敏感（SearchDescriptions 前缀匹配在 pg 下更严格）。
 package store
 
-import "fmt"
+import (
+	"fmt"
+
+	"gorm.io/gorm"
+)
 
 func pgDDL() []string {
 	return []string{
@@ -105,11 +109,21 @@ func pgDDL() []string {
 			kind TEXT NOT NULL DEFAULT 'user', user_id BIGINT NOT NULL,
 			username TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '',
 			super INTEGER NOT NULL DEFAULT 0, gen BIGINT NOT NULL DEFAULT 0,
-			ref TEXT NOT NULL DEFAULT '', token_hash TEXT NOT NULL UNIQUE,
+			ref TEXT NOT NULL DEFAULT '', client_id TEXT NOT NULL DEFAULT '',
+			token_hash TEXT NOT NULL UNIQUE,
 			expires_at TIMESTAMP NOT NULL, last_used_at TIMESTAMP NOT NULL,
 			created_at TIMESTAMP NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_authsess_exp ON auth_sessions(expires_at)`,
 	}
+}
+
+// pgEnsureExtra 存量库加列守卫（0.2.4 auth_sessions.client_id；只增不改，
+// 属幂等 DDL 清单的组成部分——pg 原生支持 ADD COLUMN IF NOT EXISTS）。
+func pgEnsureExtra(db *gorm.DB) error {
+	if err := db.Exec("ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS client_id TEXT NOT NULL DEFAULT ''").Error; err != nil {
+		return fmt.Errorf("migrate: add client_id: %w", err)
+	}
+	return nil
 }
 
 // pgSeqReset 跨库复制后的 BIGSERIAL 序列对齐（仅 copy.go 使用）：

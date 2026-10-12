@@ -317,6 +317,7 @@ type authSessionRow struct {
 	Super      int64     `gorm:"column:super"` // b2i/i2b（pg 布尔列陷阱，对齐 shareRow）
 	Gen        int64     `gorm:"column:gen"`
 	Ref        string    `gorm:"column:ref"`
+	ClientID   string    `gorm:"column:client_id"` // 0.2.4：客户端唯一标识（空=未绑定）
 	TokenHash  string    `gorm:"column:token_hash"`
 	ExpiresAt  time.Time `gorm:"column:expires_at"`
 	LastUsedAt time.Time `gorm:"column:last_used_at"`
@@ -327,14 +328,14 @@ func (authSessionRow) TableName() string { return "auth_sessions" }
 
 func (r authSessionRow) fromAuthSession(a *AuthSession) authSessionRow {
 	return authSessionRow{ID: a.ID, Kind: a.Kind, UserID: a.UserID, Username: a.Username,
-		Role: a.Role, Super: b2i(a.Super), Gen: a.Gen, Ref: a.Ref, TokenHash: a.TokenHash,
-		ExpiresAt: a.ExpiresAt, LastUsedAt: a.LastUsedAt, CreatedAt: a.CreatedAt}
+		Role: a.Role, Super: b2i(a.Super), Gen: a.Gen, Ref: a.Ref, ClientID: a.ClientID,
+		TokenHash: a.TokenHash, ExpiresAt: a.ExpiresAt, LastUsedAt: a.LastUsedAt, CreatedAt: a.CreatedAt}
 }
 
 func (r authSessionRow) to() *AuthSession {
 	return &AuthSession{ID: r.ID, Kind: r.Kind, UserID: r.UserID, Username: r.Username,
-		Role: r.Role, Super: i2b(r.Super), Gen: r.Gen, Ref: r.Ref, TokenHash: r.TokenHash,
-		ExpiresAt: r.ExpiresAt, LastUsedAt: r.LastUsedAt, CreatedAt: r.CreatedAt}
+		Role: r.Role, Super: i2b(r.Super), Gen: r.Gen, Ref: r.Ref, ClientID: r.ClientID,
+		TokenHash: r.TokenHash, ExpiresAt: r.ExpiresAt, LastUsedAt: r.LastUsedAt, CreatedAt: r.CreatedAt}
 }
 
 // ---------- upload_sessions ----------
