@@ -8,7 +8,7 @@ FileManage 体系的服务端（gin 提供 REST API，统一 `/api/v1`）：不�
 可选 redis 缓存；未配置数据库时默认内置 `file` 文件存储、全功能可用——单实例 flock，见 0.1.1），
 store 层为工程内建（独立工程 filemanageDb 已并入、不再存在）。
 
-当前版本：**0.2.4**（产物版本由 git tag 经 `-ldflags` 注入 `internal/version`，见 `CHANGELOG.md`）
+当前版本：**0.2.7**（产物版本由 git tag 经 `-ldflags` 注入 `internal/version`，见 `CHANGELOG.md`）
 
 ## 快速开始（Get Start）
 
@@ -33,7 +33,8 @@ store 层为工程内建（独立工程 filemanageDb 已并入、不再存在）
    `admin-account.json`；
 2. 编辑 `server.json`：至少配置一个 `roots` 条目（托管目录），按需改 `listen`/
    `adminListen`/`lanOnly`/`adminAccess`；重启服务；
-3. 从启动日志取初始口令：`已生成超级管理员账户 admin（…）：初始口令 "…"（仅首次登录前为明文）`；
+3. 从启动**控制台输出**取初始口令：`已生成超级管理员账户 admin（…）：初始口令 "…"（仅首次登录前为明文）`
+   ——敏感口令只回显控制台，**不写入日志文件**（0.2.7 敏感纪律）；
 4. 浏览器打开 `http://127.0.0.1:8485/admin/`，以 `admin` + 该口令登录管理台
    （**无库=文件存储、热切换换库后同样可登录**——超管存账户文件不依赖库；首次登录成功后口令自动转 bcrypt 密文）；
 5. 管理台"数据库"页选择驱动并连接（sqlite3 留空 DSN 即可；MySQL/PostgreSQL 填 DSN，
@@ -44,7 +45,8 @@ store 层为工程内建（独立工程 filemanageDb 已并入、不再存在）
    `adminPassword` 后重启）即重置，旧登录令牌立即作废。
 
 - **0.1.0：超级管理员存于账户文件**（不进数据库）——首次启动自动生成
-  `<dataDir>/admin-account.json`（用户名 `admin` + 随机明文口令，**打印在启动日志**），
+  `<dataDir>/admin-account.json`（用户名 `admin` + 随机明文口令，**只回显启动控制台、
+  不入日志文件**——0.2.7 敏感纪律），
   浏览器打开 `http://127.0.0.1:8485/admin/` 用该账户登录管理台（**任何存储形态——
   含无库文件存储——都能登录**）。口令状态机：**使用前为明文**（管理台"超级管理员"页可回显），
   **首次成功登录后自动转 bcrypt 密文**（此后不可回显）。管理台含
@@ -69,11 +71,11 @@ store 层为工程内建（独立工程 filemanageDb 已并入、不再存在）
 - **0.1.0：用户文件不可执行**：托管内容（配置根 + Users）中常规文件的执行位在启动清扫与
   move/copy 时被剥离（目录保留穿越位），防止被服务端本地 exec
 
-## 配置（server.json，schemaVersion=9）
+## 配置（server.json，schemaVersion=11）
 
 ```jsonc
 {
-  "schemaVersion": 9,
+  "schemaVersion": 11,
   "listen": "0.0.0.0:8484",
   "adminListen": "127.0.0.1:8485",       // 管理面独立端口（/admin/ 与全部管理 API 仅此端口可达）
   "lanOnly": true,                       // 仅局域网可访问（用户端口；管理端口改由 adminAccess 判定）
@@ -111,6 +113,10 @@ store 层为工程内建（独立工程 filemanageDb 已并入、不再存在）
   // 三层认证图（0.2.3，需求2）：L1 进程内 LRU 上限与新鲜期 / L2 redis 条目上限 / 清扫与续期写回节奏
   "auth": { "memMaxEntries": 200000, "memTTL": "5m", "redisMaxEntries": 5000000,
             "sweepInterval": "10m", "touchWriteEvery": "10m" },
+  // 服务端日志（0.2.7）：等级 debug|info|warn|error（默认 warn，非法取值收敛 warn）；
+  // dir 空=<dataDir>/logs；含当前文件在内最多 maxFiles 个、单文件 ≤maxMB MB 按大小轮转；
+  // 日志同时镜像 stdout（前台/容器直读）。敏感值（口令/令牌/请求体/头）永不入日志。
+  "log": { "level": "warn", "dir": "", "maxMB": 10, "maxFiles": 3 },
   "anonymous": { "enabled": true },      // 未登录只读浏览（需求6）
   "rateLimit": { "uploadKBps": 0, "downloadKBps": 0 }, // 0=不限速（需求18）
   "tls": { "enabled": false, "certFile": "", "keyFile": "", "autoSelfSign": true },
@@ -146,6 +152,25 @@ trashDir、uploadStagingDir，以及 **`<dataDir>/Users`（用户文件与
 容器化（需求28）：`deploy/docker/{ubuntu22.04,debian12,rockylinux}/Dockerfile`，
 `NODES_PER_CONTAINER` 控制每容器节点数，docker-compose 控制容器数量。
 
+## 日志（0.2.7，internal/logx）
+
+标准库 `log/slog` 实现，**零新依赖、`/api/v1` 数据协议零变更**（仅响应新增 `X-Trace-Id` 头）：
+
+- **文件轮转**：`<logDir>/filemanage-server.log`（`log.dir` 空则 `<dataDir>/logs`），写前判长
+  按大小轮转 `.log.1`/`.log.2`（oldest-first、溢出删除）——**含当前文件在内最多 `log.maxFiles`
+  个（默认 3）、每个 ≤ `log.maxMB` MB（默认 10）**；同时镜像 stdout（前台/Docker 直接可看）。
+- **等级**：`log.level` = `debug|info|warn|error`，**默认 warn**（未知取值收敛 warn）。
+  存量 stdlib `log.Printf` 桥接为 INFO——生命周期横幅/计数行默认静默，真实故障站点
+  （internal error、审计/配库/认证/清理器失败等）显式走 `logx.Warn/Error` 保持默认可见。
+- **链路追踪**：每请求一个 trace ID（入头 `X-Trace-Id`/`X-Request-Id` 消毒透传，非法或缺失
+  自动生成 16 位十六进制），回显响应头 `X-Trace-Id`；请求日志行
+  `trace=<id> <METHOD> <path?query> <status> <dur> from=<remote>`，按状态分级
+  （5xx=Error、4xx=Warn、其余=Info）；panic 由 `recoverGin` 兜底记录（trace+截断堆栈）
+  并回 500 错误信封，进程不再因单个 handler 崩溃。用户端口与管理端口同享。
+- **敏感信息纪律**：**绝不记录请求体与任何请求头**（凭证/口令只存在于二者）、绝不记录
+  口令与令牌值；首启超管明文口令只回显启动控制台、不写入日志文件。
+- balancer 模式同样初始化日志（其 stdlib 请求行经桥接落同一轮转文件）。
+
 ## API 摘要（/api/v1，`GET /api` 可发现版本）
 
 | 分组 | 端点 |
@@ -167,9 +192,9 @@ trashDir、uploadStagingDir，以及 **`<dataDir>/Users`（用户文件与
 cmd/filemanage-server/   入口（worker/balancer 两种模式）
 internal/store/          元数据抽象：Store 接口 + sqlStore 单实现 + sqlite3/mysql/pg 方言层
 internal/cache/          可选 redis 缓存（Store 装饰器：读穿透 + 写失效）
-internal/config/         配置加载 + schema 迁移链（当前 v9：auth 三层认证图段）
+internal/config/         配置加载 + schema 迁移链（当前 v11：log 服务端日志段）
 internal/superadmin/     超管账户文件（0.1.0：明文→首用转密文、generation 纪元吊销、无库可用）
-internal/api/            Server 聚合 + gin 双引擎路由（用户口 lanFilter/管理口 adminIPFilter）+ v1_* handlers
+internal/api/            Server 聚合 + gin 双引擎路由（用户口 lanFilter/管理口 adminIPFilter；0.2.7 引擎级 recoverGin/traceGin/loggerGin）+ v1_* handlers
 internal/auth/           不透明随机凭证 + 三层认证图（L1 LRU / L2 redis / L3 auth_sessions）
 internal/perm/           目录权限引擎（用户/用户组/public，就近祖先继承）
 internal/transfer/       分片上传管理 / 路径锁 / 令牌桶限速
@@ -178,12 +203,14 @@ internal/ai/             AIProvider 接口 + openai/ollama/none
 internal/adminui/        go:embed 管理员 Web 界面（web/）
 internal/balancer/       内置负载均衡反向代理
 internal/tlsx/           自签证书生成
+internal/logx/           服务端日志（0.2.7：slog 轮转 ≤3 文件×10MB / 等级默认 warn / stdlib 桥接 / trace 变体 / 敏感纪律）
 deploy/                  Docker / compose / nginx 样例
 ```
 
 ## 版本兼容
 
-见 `CHANGELOG.md` 兼容矩阵。当前基线：**Server 0.2.x（0.2.4）↔ Client 0.3.x
-（推荐 0.3.6）**——0.2.4 认证收敛（登录只回 `{token}`、refresh 删除、绑定会话查 `X-Client-Id` 头、滑动窗口 1h）为破坏批，旧客户端 ≤0.3.5 登录/刷新/
+见 `CHANGELOG.md` 兼容矩阵。当前基线：**Server 0.2.x（0.2.7）↔ Client 0.3.x
+（推荐 0.3.6）**——0.2.7 服务端日志为纯服务端可观测性增强（**`/api/v1` 数据协议零变更**，
+仅新增响应头 `X-Trace-Id`；对 Client 0.1.x–0.3.7 全系列无感兼容）。0.2.4 认证收敛（登录只回 `{token}`、refresh 删除、绑定会话查 `X-Client-Id` 头、滑动窗口 1h）为破坏批，旧客户端 ≤0.3.5 登录/刷新/
 分享/管理台全链路兼容（升级后存量令牌一次性失效、重登一次）。元数据层自含（无独立
-Db 工程）；旧配置启动时按 schemaVersion 自动迁移（当前链至 v9）。
+Db 工程）；旧配置启动时按 schemaVersion 自动迁移（当前链至 v11）。

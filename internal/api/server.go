@@ -5,7 +5,6 @@ package api
 import (
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"filemanageServer/internal/cache"
 	"filemanageServer/internal/config"
 	"filemanageServer/internal/fileops"
+	"filemanageServer/internal/logx"
 	"filemanageServer/internal/perm"
 	store "filemanageServer/internal/store"
 	"filemanageServer/internal/superadmin"
@@ -218,7 +218,9 @@ func (s *Server) audit(c *gin.Context, action, username string, userID int64, ro
 		e.UserID, e.Username = u.ID, u.Username
 	}
 	if err := s.Store.AddAuditEvent(e); err != nil {
-		log.Printf("audit: %v", err)
+		// 0.2.7：审计写入失败是真实运行故障（默认等级 warn 下必须可见），
+		// 走 logx.Warn 并带链路 trace；错误串不含敏感值。
+		logx.WarnT(traceOf(c), "audit: %v", err)
 	}
 }
 

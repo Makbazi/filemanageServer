@@ -112,6 +112,17 @@ type BalancerCfg struct {
 	Workers []string `json:"workers"`
 }
 
+// LogConf 服务端日志（0.2.7，见 internal/logx）：等级/目录/轮转上限。
+// 落盘文件含当前文件在内最多 MaxFiles 个（默认 3）、每个 ≤ MaxMB MB（默认 10），
+// 按大小轮转改名链 .log.1/.log.2/…；stdout 同步镜像。敏感值（口令/令牌/
+// 请求体/头）永不入日志——纪律见 logx 包注释，等级默认 warn。
+type LogConf struct {
+	Level    string `json:"level"`    // debug|info|warn|error，默认 warn
+	Dir      string `json:"dir"`      // 空=dataDir/logs
+	MaxMB    int    `json:"maxMB"`    // 单文件上限 MB，默认 10
+	MaxFiles int    `json:"maxFiles"` // 最多保留文件数（含当前），默认 3
+}
+
 // DBCfg 元数据库配置。Driver 取值：
 // "file"（含别名 ""/"none"，0.1.1 起为默认：未配置数据库时使用内置文件存储，
 // DSN=存储目录，留空派生 <dataDir>/filestore，全功能可用、仅单实例）|
@@ -139,7 +150,7 @@ type RedisCfg struct {
 	ACLTTLSeconds  int    `json:"aclTTLSeconds"`  // 默认 60
 }
 
-// Config 服务端配置（schemaVersion=9）。
+// Config 服务端配置（schemaVersion=11）。
 type Config struct {
 	SchemaVersion int `json:"schemaVersion"`
 
@@ -184,6 +195,7 @@ type Config struct {
 	TLS       TLSCfg       `json:"tls"`
 	Session   SessionCfg   `json:"session"`
 	Auth      AuthCfg      `json:"auth"` // 三层认证图（0.2.3）
+	Log       LogConf      `json:"log"`  // 服务端日志（0.2.7：等级/目录/轮转上限）
 	Anonymous AnonymousCfg `json:"anonymous"`
 	RateLimit RateLimitCfg `json:"rateLimit"`
 	Versions  VersionsCfg  `json:"versions"`
@@ -205,6 +217,7 @@ func DefaultConfig() *Config {
 		MaxUploadBytes:     2 << 30,
 		Session:            SessionCfg{AccessTTL: "1h", IdleDays: 21, IdleMinutes: 60},
 		Auth:               AuthCfg{MemMaxEntries: 200000, MemTTL: "5m", RedisMaxEntries: 5000000, SweepInterval: "10m", TouchWriteEvery: "10m"},
+		Log:                LogConf{Level: "warn", MaxMB: 10, MaxFiles: 3}, // Dir 留空=<dataDir>/logs（finalize/LogDir 派生）
 		Anonymous:          AnonymousCfg{Enabled: true},
 		Versions:           VersionsCfg{Enabled: true, MaxVersions: 10},
 		TLS:                TLSCfg{AutoSelfSign: true},
@@ -373,6 +386,23 @@ func finalize(c *Config) (*Config, error) {
 	if c.Auth.TouchWriteEvery == "" {
 		c.Auth.TouchWriteEvery = "10m"
 	}
+	// 日志（0.2.7）：等级非法值收敛为 warn（默认等级，不因配置笔误拒绝启动）；
+	// 轮转上限收敛——maxMB<=0→10、maxFiles<1→3、>10→10（防失控占用磁盘）。
+	switch strings.ToLower(strings.TrimSpace(c.Log.Level)) {
+	case "debug", "info", "warn", "error":
+		c.Log.Level = strings.ToLower(strings.TrimSpace(c.Log.Level))
+	default:
+		c.Log.Level = "warn"
+	}
+	if c.Log.MaxMB <= 0 {
+		c.Log.MaxMB = 10
+	}
+	if c.Log.MaxFiles < 1 {
+		c.Log.MaxFiles = 3
+	}
+	if c.Log.MaxFiles > 10 {
+		c.Log.MaxFiles = 10
+	}
 	if c.Versions.MaxVersions <= 0 {
 		c.Versions.MaxVersions = 10
 	}
@@ -443,6 +473,14 @@ func (c *Config) HomeDir(username string) string { return filepath.Join(c.UsersD
 
 // TLSDir 自签证书目录（归入 dataDir，替代原硬编码 ./data/tls）。
 func (c *Config) TLSDir() string { return filepath.Join(c.DataDir, "tls") }
+
+// LogDir 服务端日志目录（0.2.7）：log.dir 显式配置优先，否则 <dataDir>/logs。
+func (c *Config) LogDir() string {
+	if c.Log.Dir != "" {
+		return c.Log.Dir
+	}
+	return filepath.Join(c.DataDir, "logs")
+}
 
 // AdminAccountFile 超级管理员账户文件（0.1.0 需求32）：<dataDir>/admin-account.json。
 // 与 jwt.secret 同理属运行数据：多实例共享部署需放共享卷或逐节点保持一致。
@@ -567,6 +605,7 @@ func WriteExample(path string) error {
 		"tls":                map[string]any{"enabled": false, "certFile": "", "keyFile": "", "autoSelfSign": true},
 		"session":            map[string]any{"accessTTL": "1h", "idleDays": 21},
 		"auth":               map[string]any{"memMaxEntries": 200000, "memTTL": "5m", "redisMaxEntries": 5000000, "sweepInterval": "10m", "touchWriteEvery": "10m"}, // 三层认证图（0.2.3）：进程内 LRU 上限/新鲜期、redis 上限、清扫周期、续期写回间隔
+		"log":                map[string]any{"level": "warn", "dir": "", "maxMB": 10, "maxFiles": 3},                                                                // 服务端日志（0.2.7）：等级 debug|info|warn|error（默认 warn）；dir 空=<dataDir>/logs；含当前文件在内最多 maxFiles 个、单文件 ≤maxMB MB 按大小轮转；敏感值（口令/令牌/请求体）永不入日志
 		"anonymous":          map[string]any{"enabled": true},
 		"rateLimit":          map[string]any{"uploadKBps": 0, "downloadKBps": 0, "qps": 0},
 		"corsAllowOrigins":   []string{},

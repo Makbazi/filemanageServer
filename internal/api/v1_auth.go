@@ -5,7 +5,6 @@ import (
 
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 
 	"filemanageServer/internal/auth"
 	"filemanageServer/internal/fileops"
+	"filemanageServer/internal/logx"
 	store "filemanageServer/internal/store"
 	"filemanageServer/internal/version"
 )
@@ -221,7 +221,9 @@ func (s *Server) handleLogout(c *gin.Context) {
 	}
 	if cred != "" {
 		if err := s.Auth.Revoke(c.Request.Context(), cred); err != nil {
-			log.Printf("auth: warn: logout revoke failed: %v", err) // 尽力而为，客户端本地一律清除
+			// 尽力而为，客户端本地一律清除；0.2.7 走 logx.Warn 保持默认可见
+			// （日志只含错误串——绝不打印凭证值本身，敏感纪律）
+			logx.WarnT(traceOf(c), "auth: logout revoke failed: %v", err)
 		}
 	}
 	writeJSON(c, http.StatusOK, map[string]any{"ok": true})

@@ -72,8 +72,10 @@ func (s *Server) newEngine(netGuard gin.HandlerFunc, extra ...gin.HandlerFunc) *
 	e.NoMethod(func(c *gin.Context) {
 		writeErr(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 	})
-	// 全局中间件顺序：logger 最外 → 网络准入 → QPS → CORS →（管理端口）adminScope → 业务
-	e.Use(loggerGin(), netGuard, s.qpsLimit(), s.corsGin())
+	// 全局中间件顺序（0.2.7 日志批）：recover 最外（兜住其后一切 panic）→ trace
+	// （先于 logger，保证每条请求日志带链路 ID）→ logger → 网络准入 → QPS → CORS
+	// →（管理端口）adminScope → 业务。两引擎（Handler/AdminHandler）共用本装配。
+	e.Use(recoverGin(), traceGin(), loggerGin(), netGuard, s.qpsLimit(), s.corsGin())
 	for _, h := range extra {
 		e.Use(h)
 	}

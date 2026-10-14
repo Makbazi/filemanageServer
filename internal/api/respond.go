@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"filemanageServer/internal/fileops"
+	"filemanageServer/internal/logx"
 	store "filemanageServer/internal/store"
 	"filemanageServer/internal/transfer"
 )
@@ -54,6 +55,9 @@ func isNetDisconnect(err error) bool {
 // 5xx（503 降级模式 errNoDB 为契约信息除外）对外只输出通用文案，
 // 原始错误写服务端日志——防止数据库驱动内部错误串泄露主机/账号。
 // 499（客户端断连，0.2.1）只记一行 info，绝不记 internal error。
+// 0.2.7：internal error 走 logx.Error（默认等级 warn 下可见）并带链路 trace；
+// 断连行沿用 stdlib log 桥接=INFO 形态（网络常态，刻意不进 warn 面）。
+// 日志内容只有方法/路径/错误串——绝不落请求头与请求体（敏感纪律）。
 func writeErr(c *gin.Context, code int, err error) {
 	msg := err.Error()
 	switch {
@@ -61,7 +65,7 @@ func writeErr(c *gin.Context, code int, err error) {
 		log.Printf("client disconnected: %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
 		msg = "client closed request"
 	case code >= http.StatusInternalServerError && code != http.StatusServiceUnavailable:
-		log.Printf("internal error: %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
+		logx.ErrorT(traceOf(c), "internal error: %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
 		msg = "internal server error"
 	}
 	writeJSON(c, code, map[string]string{"error": msg})

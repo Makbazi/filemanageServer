@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,6 +26,7 @@ import (
 	"strings"
 
 	"filemanageServer/internal/fileops"
+	"filemanageServer/internal/logx"
 	store "filemanageServer/internal/store"
 )
 
@@ -246,10 +246,11 @@ func (m *Manager) Complete(sess *store.UploadSession, destAbs string, beforeRepl
 	// 下次巡检或重试路径暴露，绝不能再改文件）。
 	sess.Status = store.UploadStatusCompleted
 	if err := m.Store.UpdateUploadSession(sess); err != nil {
-		log.Printf("transfer: session %s complete mark failed (file already replaced): %v", sess.ID, err)
+		// 0.2.7：走 logx.Warn（默认等级 warn 下可见）；会话 ID 与错误串均非敏感值
+		logx.Warn("transfer: session %s complete mark failed (file already replaced): %v", sess.ID, err)
 	}
 	if err := os.RemoveAll(m.sessionDir(sess.ID)); err != nil {
-		log.Printf("transfer: staging cleanup for session %s: %v", sess.ID, err)
+		logx.Warn("transfer: staging cleanup for session %s: %v", sess.ID, err)
 	}
 	return hash, size, nil
 }
