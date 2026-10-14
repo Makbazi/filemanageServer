@@ -29,6 +29,7 @@ import (
 	"filemanageServer/internal/cache"
 	"filemanageServer/internal/config"
 	"filemanageServer/internal/fileops"
+	"filemanageServer/internal/logx"
 	store "filemanageServer/internal/store"
 	"filemanageServer/internal/superadmin"
 	"filemanageServer/internal/tlsx"
@@ -69,6 +70,12 @@ func runBalancer(cfgPath string) {
 	if err != nil {
 		log.Fatalf("load balancer config: %v", err)
 	}
+	// 日志装配（0.2.7）：balancer 不经 gin 引擎，其 stdlib log（含请求行）
+	// 经 logx 桥接统一落轮转文件与 stdout；失败即退出（fail-fast）。
+	if err := logx.Setup(cfg.Log, cfg.DataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "init logging: %v\n", err)
+		os.Exit(1)
+	}
 	if err := balancer.Run(cfg.Listen, cfg.Balancer.Workers, cfg.LANOnly); err != nil {
 		log.Fatal(err)
 	}
@@ -89,6 +96,14 @@ func runWorker(cfgPath string) {
 		log.Fatalf("load config: %v", err)
 	}
 
+	// 日志装配（0.2.7）：轮转文件（含当前最多 maxFiles 个、每个 ≤maxMB；默认
+	// <dataDir>/logs）+ stdout 镜像；等级默认 warn。此后 stdlib log 输出桥接进
+	// slog 同一通道。Setup 失败没有任何降级余地——打印 stderr 后退出 1。
+	if err := logx.Setup(cfg.Log, cfg.DataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "init logging: %v\n", err)
+		os.Exit(1)
+	}
+
 	// 超级管理员账户（0.1.0 需求32/34）：文件承载、不依赖元数据库，降级模式同样可登录。
 	super := superadmin.New(cfg.AdminAccountFile())
 	name, pw, created, err := super.EnsureCreated()
@@ -96,7 +111,8 @@ func runWorker(cfgPath string) {
 		log.Fatalf("init superadmin account: %v", err)
 	}
 	if created {
-		log.Printf("已生成超级管理员账户 %s（文件 %s）：初始口令 %q —— 仅首次登录前为明文，登录后自动转密文",
+		// 敏感口令只回显控制台、不入日志文件（需求4）
+		fmt.Printf("已生成超级管理员账户 %s（文件 %s）：初始口令 %q —— 仅首次登录前为明文，登录后自动转密文\n",
 			name, cfg.AdminAccountFile(), pw)
 	}
 	if cfg.AdminPassword != "" {

@@ -20,7 +20,6 @@ package api
 import (
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"path/filepath"
 	"regexp"
@@ -30,6 +29,7 @@ import (
 
 	"filemanageServer/internal/config"
 	"filemanageServer/internal/fileops"
+	"filemanageServer/internal/logx"
 	store "filemanageServer/internal/store"
 	"filemanageServer/internal/version"
 )
@@ -285,13 +285,14 @@ func (s *Server) handleAdminDBConnect(c *gin.Context) {
 	if s.Cache != nil {
 		if ferr := s.Cache.FlushAll(); ferr != nil {
 			// 缓存失效失败只告警：键有 TTL，且已切换为新库为准
-			log.Printf("db connect: cache flush: %v", ferr)
+			// （0.2.7：走 logx.Warn——默认等级 warn 下真实故障必须可见）
+			logx.WarnT(traceOf(c), "db connect: cache flush: %v", ferr)
 		}
 	}
 	// 家目录存量补齐（幂等；空新库无用户也直接落标记，见 EnsureUserHomes）
 	if s.dbReady() {
 		if herr := fileops.EnsureUserHomes(s.DBProxy, s.Cfg.UsersDir()); herr != nil {
-			log.Printf("db connect: ensure homes: %v", herr)
+			logx.WarnT(traceOf(c), "db connect: ensure homes: %v", herr)
 		}
 	}
 	if old != nil {

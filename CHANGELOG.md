@@ -10,7 +10,7 @@
 
 | filemanageServer | 元数据存储 | 兼容 filemanageClient |
 |---|---|---|
-| 0.2.x（当前 **0.2.4**） | 自含（同 0.2.3；0.2.4 认证收敛：`auth_sessions` 加列 `client_id`（四方言 CREATE 含列 + 存量库幂等加列守卫，只增不改）、配置 schemaVersion 9→10（session.idleMinutes=60，滑动窗口 21 天→1 小时）；0.2.3 的 `auth_sessions` 表/auth 段/去 JWT 沿用） | **Client 0.3.6 推荐基线（认证破坏批）**：用户端口登录只回 `{token}`、`/auth/refresh` 移除、绑定会话逐请求核对 `X-Client-Id`——0.3.6 配套（单凭证/自动重登/退出登出/浏览零整文件）。旧客户端 0.1.x–0.3.5 与移动端**可用但降级**（会话未绑定不查头；无 refreshToken 回显走"过期即重登"；refresh 401/404 退化重登；窗口同降 1h）。管理台内嵌前端兼容（保留 `{token,user}`）；`GET /thumb` JPEG/RAW 出图面提至 50MP/9000px（对一切客户端纯增益）|
+| 0.2.x（当前 **0.2.7**） | 自含（同 0.2.4；0.2.7 服务端日志：新增 `log` 配置段（level/dir/maxMB/maxFiles，schemaVersion 10→11 migrate10to11 只补缺；无任何新表/新列，go.mod 零变更——log/slog 属标准库）；0.2.4 认证收敛（`client_id` 列、session.idleMinutes）与 0.2.3 auth_sessions/去 JWT 沿用） | **对一切客户端无感（`/api/v1` 数据协议零变更）**——0.2.7 为纯服务端可观测性增强，仅响应新增 `X-Trace-Id` 头（客户端无感知、零解析依赖）；兼容 Client 0.1.x–**0.3.7** 全系列。推荐基线为 **Client 0.3.7**（本批配套定版；0.3.6 起的认证收敛语义全保留——用户端口登录只回 `{token}`、`/auth/refresh` 移除、绑定会话逐请求核对 `X-Client-Id`；0.3.7 的转码/恢复/渲染/批量/设置能力对协议零依赖）。旧客户端 0.1.x–0.3.5 与移动端**可用但降级**（会话未绑定不查头；无 refreshToken 回显走"过期即重登"；refresh 401/404 退化重登；窗口同降 1h）。管理台内嵌前端兼容（保留 `{token,user}`）；`GET /thumb` JPEG/RAW 出图面提至 50MP/9000px（对一切客户端纯增益）|
 | 0.2.3 | 自含（同 0.1.x；0.2.3 认证重构：新表 `auth_sessions`（幂等增量，四方言+file 驱动）、配置 schemaVersion 8→9（auth 段）、`golang-jwt` 依赖移除；旧 `sessions` 表冻结不再读写但保留磁盘兼容） | Client 0.3.4（推荐位由 0.3.6 取代；认证协议字段形状零变更，0.1.x–0.3.4 登录/刷新/分享/管理台全链路可用）；**一次性代价**：升级到该版本时所有既有 JWT/refresh/分享 st 令牌失效，重登一次 |
 | 0.2.2 | 自含（同 0.1.x；仅 `GET /thumb` 白名单扩 BMP（thumbdec.go 纯标准库自实现），无新端点/新表/新列、schemaVersion 保持 8） | Client 0.3.3（服务端网格 BMP 出图=本地缩放机制）；Client 0.3.2/0.2.x 无感可用且 BMP 由 415 变 200 为纯增益面（旧客户端 size_hint 回退语义不变）；Client 0.1.x 及以下同 |
 | 0.2.1 | 自含（同 0.1.x；纯 API 面加性 `GET /thumb`+`POST /check` 与静默修复，无新表/新列、schemaVersion 保持 8） | **Client 0.3.2 完整功能（浏览零下载+目录重传预检依赖本版本端点）**；Client 0.2.0/0.3.x 早期版本全功能无感（不调用新端点即无感）；Client 0.1.x 及以下同 |
@@ -43,6 +43,71 @@
   版本号落到 `"unknown"`。设 `FM_VERSION=x.y.z ./build.sh -a all` 可跳过 git 推导固定版本
   （此时也不追加 `-dirty`）；亦可在流水线先 `git fetch --tags --force`（浅克隆加
   `--unshallow`）并 `git config --global --add safe.directory "$WORKSPACE"` 让 tag 真正可用。
+
+## [0.2.7] - 2026-10-14（服务端日志：轮转文件 + 链路追踪 + 等级可配 + 敏感信息纪律；用户 2026-10-14 清单第 4 条；跳号 0.2.4→0.2.7 系维护者定版指令；tag 由维护者打）
+
+### 新增（internal/logx，标准库 log/slog，零新依赖、go.mod/go.sum 不变）
+- **日志文件**：`<logDir>/filemanage-server.log` 按大小轮转（写前判长、越过上限才轮转），
+  改名链 `.log.1`/`.log.2`（oldest-first、溢出删除）——**含当前文件在内最多 3 个、单文件
+  ≤10MB（均可配）**；互斥守护写入，slog 文本 Handler 一行一条记录；重启续写既有文件并
+  从实际大小累计，绝不让单文件超限。同时 **io.MultiWriter 镜像 stdout**（前台/容器部署直读）。
+- **等级可配**：`log.level = debug|info|warn|error`，**默认 warn**（未知取值收敛为 warn，
+  不因配置笔误拒绝启动）；printf 风格 `logx.Debug/Info/Warn/Error` 与链路变体
+  `DebugT/InfoT/WarnT/ErrorT`（行首 `trace=<id>`）。
+- **stdlib log 桥接**：Setup 后 `log.SetFlags(0)`+`log.SetOutput` 把存量 `log.Printf`
+  逐行按 **INFO** 送进 slog（时间戳由 slog 统一添加），生命周期横幅/计数行经桥接在默认
+  warn 下不再显示——**刻意降噪，符合"默认等级 warn"需求**；错误/告警面按下列改造显式转
+  logx 保持默认可见。
+- **敏感信息纪律（需求6 底线延伸）**：**绝不记录请求体、Authorization 等任何请求头、
+  口令、令牌值**；请求日志只含 方法/路径?查询/状态/耗时/来源 IP 与 trace。main.go 首启
+  超管明文口令改为 `fmt.Printf` **只回显控制台、不入日志文件**（需求4）；auth L2 撤权重试
+  行仅含 SHA-256 摘要 8 位前缀（非凭证值）。
+
+### 新增（请求链路追踪与 panic 兜底，internal/api）
+- `traceGin()`：取请求头 `X-Trace-Id`（其次 `X-Request-Id`），入头消毒（≤64 字符且仅
+  `[0-9A-Za-z._-]`，非法视为伪造重新生成），无头则 crypto/rand 生成 16 位十六进制 ID；
+  存 gin 上下文并**回显响应头 `X-Trace-Id`**（响应体形状零变更，health 等既有契约不动）。
+- `loggerGin()` 重写走 logx：5xx=Error、4xx=Warn、其余=Info，行格式
+  `trace=<id> <METHOD> <path?query> <status> <dur> from=<remote>`（先组行再以常量格式
+  传入，路径含 `%` 动词不会被二次解释——vet printf 检查同项约束）。
+- `recoverGin()`（**全仓此前无任何 recovery，handler panic 会打死进程**）：捕获后按
+  Error 记 trace+panic 值+截断 4KB 堆栈（换行折叠保持单行形态），按 respond.go 信封回
+  `500 {"error":"internal server error"}`（原始 panic 文案只进日志不出响应）。
+- 两引擎统一挂载（`newEngine` 装配点）：链序 recover → trace → logger → 网络准入 →
+  qps → cors；用户口与管理口同享。`-mode balancer` 同样 `logx.Setup`（其 stdlib 请求行
+  经桥接落同一轮转文件）。
+
+### 改造（真实错误/告警站点转 logx，默认等级下保持可见）
+- `respond.go` internal error → `logx.ErrorT`（带 trace；499 断连行**刻意保留** stdlib
+  log=桥接 INFO——0.2.1"网络常态不刷错误"契约不变）；`server.go` 审计写入失败 →
+  `logx.WarnT`；`v1_auth.go` logout 撤权失败、`v1_dbconfig.go` cache flush/ensure
+  homes 失败 → `logx.WarnT`；`auth/center.go` L2 redis 不可达/读写/撤权失败/续期写回
+  失败 → `logx.Warn`；`transfer/chunks.go` complete 标记/暂存清理失败、
+  `fileops/cleaner.go` trash/sessions/audit/uploads 清理失败 → `logx.Warn`。
+- main.go 与 store/balancer 生命周期行维持桥接（INFO，默认不可见）。
+
+### 配置（需求25：schemaVersion 10→11）
+- 新增 `log` 段：`{"level":"warn","dir":"","maxMB":10,"maxFiles":3}`（dir 空=
+  `<dataDir>/logs`；finalize 钳制：非法等级→warn、maxMB≤0→10、maxFiles<1→3、>10→10）；
+  访问器 `LogDir()`；示例配置与 `DefaultConfig` 同步带出。
+- `migrate10to11` 只补缺不覆盖（存量显式 log 段原样保留，段内缺键由默认值兜底）；
+  迁移备份/未知字段保留纪律沿用；文档注释 schemaVersion 修正为 11。
+
+### 验证
+- `go build ./... && go vet ./...` ✓、gofmt 干净。
+- 冒烟：首启示例配置含 log 段（schemaVersion 11）✓；`GET /health` 响应头 `X-Trace-Id`
+  出现、body 键与历代一致 ✓；`/api/v1/nonexistent` → 日志文件出现同 trace 的 WARN 行 ✓；
+  外部传入 `X-Trace-Id`/`X-Request-Id` 合法即回显、含空格等非法字符重新生成 ✓；默认
+  warn 启动横幅不入日志，level=info 重启后可见 ✓；level=info+maxMB=1 突发 3 万请求 →
+  恰 3 个文件、轮转件各 ≤1MB（oldest 溢出删除）✓；首启超管明文口令仅出现在 stdout、
+  日志文件零命中 ✓；v10 配置（无 log 段、listen 自定义）启动自动升 v11 补默认 log 段、
+  自定义值存活、`.bak-<时间戳>` 备份 ✓。
+
+### 兼容
+- **`/api/v1` 数据协议零变更**：登录/健康/列表/上传/分享等全部响应体与状态码不动，
+  仅新增响应头 `X-Trace-Id`——对一切客户端（**Client 0.1.x–0.3.7**）无感、无解析依赖；
+  管理台与内嵌前端同。配置 schemaVersion 10→11 只补缺不覆盖（需求25），旧配置升级
+  零丢值；无新表/新列、Store 接口零变更、go.mod/go.sum 零变更（纯标准库实现）。
 
 ## [0.2.4] - 2026-10-12（认证响应面收敛：单凭证 + 客户端唯一标识绑定 + 1h 滑动窗口；缩略图 JPEG 出图面扩至 50MP；用户 2026-10-12 清单第 2/3 条；tag 由维护者打）
 
