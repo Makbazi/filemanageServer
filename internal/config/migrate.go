@@ -11,11 +11,11 @@ import (
 // CurrentSchema 当前配置 schema 版本。
 // 每次配置结构发生不兼容变化时 +1，并在下方追加对应迁移函数（需求25：
 // 服务端安全升级——旧配置文件自动迁移、原文件备份、未知字段保留）。
-const CurrentSchema = 11
+const CurrentSchema = 12
 
-// MigrateMap 对通用 map 形式的配置执行迁移链 v1→…→v10→v11，返回是否发生变化。
+// MigrateMap 对通用 map 形式的配置执行迁移链 v1→…→v11→v12，返回是否发生变化。
 // 缺失 schemaVersion 的旧配置视为 v1（v1–v7 为基线前内部迭代、从未发布；
-// v8 自 0.1.0 起、v9 自 0.2.3 起、v10 自 0.2.4 起、v11 自 0.2.7 起）。
+// v8 自 0.1.0 起、v9 自 0.2.3 起、v10 自 0.2.4 起、v11 自 0.2.7 起、v12 自 0.2.8 起）。
 func MigrateMap(m map[string]any) (bool, error) {
 	ver := 1
 	if v, ok := m["schemaVersion"].(float64); ok && v > 0 {
@@ -57,6 +57,9 @@ func MigrateMap(m map[string]any) (bool, error) {
 		case 10:
 			changed = migrate10to11(m) || changed
 			ver = 11
+		case 11:
+			changed = migrate11to12(m) || changed
+			ver = 12
 		default:
 			return changed, fmt.Errorf("no migration path from schemaVersion %d", ver)
 		}
@@ -226,6 +229,28 @@ func migrate9to10(m map[string]any) bool {
 func migrate10to11(m map[string]any) bool {
 	if _, ok := m["log"]; !ok {
 		m["log"] = map[string]any{"level": "warn", "dir": "", "maxMB": 10, "maxFiles": 3}
+		return true
+	}
+	return false
+}
+
+// migrate11to12 v11（0.2.7）→ v12（0.2.8）：上传大小上限默认值放宽（修"大文件
+// 上传一律 413"——2 GiB 默认硬上限让视频/RAW 批量归档彻底传不上去）。
+// maxUploadBytes 语义不变（0=不限），但默认不再是 2GiB：
+//   - 值恰为历代默认 2147483648（v4 起 DefaultConfig/示例配置/migrate3to4 写入的
+//     同一字面量）→ 归一为 0（不限）。这是把"从未被用户显式决定的默认值"升级，
+//     不丢任何用户自定义限额；
+//   - 键缺失 → 直接补 0（新默认，不限）；
+//   - 其余取值一律原样保留（用户显式配置的限额继续生效，超限仍 413）。
+// 需要重新收紧的部署：显式写回正数限额即可（整文件通道与分片会话创建同判）。
+func migrate11to12(m map[string]any) bool {
+	v, ok := m["maxUploadBytes"]
+	if !ok {
+		m["maxUploadBytes"] = float64(0)
+		return true
+	}
+	if f, isNum := v.(float64); isNum && f == 2147483648 {
+		m["maxUploadBytes"] = float64(0)
 		return true
 	}
 	return false

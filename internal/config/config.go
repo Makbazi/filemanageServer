@@ -150,7 +150,7 @@ type RedisCfg struct {
 	ACLTTLSeconds  int    `json:"aclTTLSeconds"`  // 默认 60
 }
 
-// Config 服务端配置（schemaVersion=11）。
+// Config 服务端配置（schemaVersion=12）。
 type Config struct {
 	SchemaVersion int `json:"schemaVersion"`
 
@@ -188,7 +188,7 @@ type Config struct {
 	TrashDir           string    `json:"trashDir"`
 	UploadStagingDir   string    `json:"uploadStagingDir"`   // 分片上传暂存目录（多实例需共享）
 	TrashRetentionDays int       `json:"trashRetentionDays"` // 回收站保留天数（需求4），默认 30
-	MaxUploadBytes     int64     `json:"maxUploadBytes"`     // 单次上传大小硬上限（字节，0=不限），默认 2GiB
+	MaxUploadBytes     int64     `json:"maxUploadBytes"`     // 单次上传大小硬上限（字节，0=不限）。0.2.8 起默认 0=不限（旧 2GiB 默认让视频/RAW 归档一律 413，见 migrate11to12）；显式配置正数即恢复限额
 	AdminPassword      string    `json:"adminPassword"`      // 超管口令重置触发器（需求32，0.1.0）：非空=启动时以其为明文重置超管账户文件，用后清空
 
 	AI        AICfg        `json:"ai"`
@@ -214,7 +214,7 @@ func DefaultConfig() *Config {
 		LANOnly:            true,
 		DataDir:            "./data",
 		TrashRetentionDays: 30,
-		MaxUploadBytes:     2 << 30,
+		MaxUploadBytes:     0, // 0.2.8：默认不限（超限 413 仅对显式配置生效）
 		Session:            SessionCfg{AccessTTL: "1h", IdleDays: 21, IdleMinutes: 60},
 		Auth:               AuthCfg{MemMaxEntries: 200000, MemTTL: "5m", RedisMaxEntries: 5000000, SweepInterval: "10m", TouchWriteEvery: "10m"},
 		Log:                LogConf{Level: "warn", MaxMB: 10, MaxFiles: 3}, // Dir 留空=<dataDir>/logs（finalize/LogDir 派生）
@@ -598,7 +598,7 @@ func WriteExample(path string) error {
 		"trashDir":           "./data/trash",
 		"uploadStagingDir":   "./data/staging",
 		"trashRetentionDays": 30,
-		"maxUploadBytes":     2147483648,
+		"maxUploadBytes":     0, // 单次上传大小硬上限（字节，0=不限）；0.2.8 起默认不限，需要限额填正数
 		"adminAccess":        map[string]any{"mode": "local", "ips": []string{}}, // 管理界面 IP 准入（需求38）：local 仅本机 / lan 局域网 / any 任何来源 / custom 指定 ips（IP 或 CIDR 列表）
 		"adminPassword":      "",                                                 // 超管口令重置触发器（0.1.0 需求32）：填入明文→启动时写入超管账户文件并提示清空；平时留空
 		"ai":                 map[string]any{"provider": "none", "baseUrl": "", "apiKey": "", "model": "", "maxFileMB": 20},
