@@ -8,7 +8,7 @@ FileManage 体系的服务端（gin 提供 REST API，统一 `/api/v1`）：不�
 可选 redis 缓存；未配置数据库时默认内置 `file` 文件存储、全功能可用——单实例 flock，见 0.1.1），
 store 层为工程内建（独立工程 filemanageDb 已并入、不再存在）。
 
-当前版本：**0.2.7**（产物版本由 git tag 经 `-ldflags` 注入 `internal/version`，见 `CHANGELOG.md`）
+当前版本：**0.2.8**（产物版本由 git tag 经 `-ldflags` 注入 `internal/version`，见 `CHANGELOG.md`；0.2.8=上传限额默认批：maxUploadBytes 2GiB→0=不限，config schemaVersion 11→12）
 
 ## 快速开始（Get Start）
 
@@ -19,16 +19,16 @@ store 层为工程内建（独立工程 filemanageDb 已并入、不再存在）
 # （镜像缺失自动构建；命名规范与细节见 build-env/README.md）
 
 # 查看版本信息（版本号 / git tag / commit_id / 编译时间）
-./build/filemanageServer_linux_0.2.0 -v
+./build/filemanageServer_linux_0.2.8 -v
 
 # 首次运行自动生成示例配置 server.json
-./build/filemanageServer_linux_0.2.0 -config server.json
+./build/filemanageServer_linux_0.2.8 -config server.json
 # 编辑 server.json 的 roots（至少一个根目录）后重启
 ```
 
 **首次上手（约 3 分钟）：**
 
-1. 编译并运行：`./build.sh -a linux && ./build/filemanageServer_linux_0.2.0 -config server.json`
+1. 编译并运行：`./build.sh -a linux && ./build/filemanageServer_linux_0.2.8 -config server.json`
    —— 首启自动生成示例配置并在 `dataDir`（默认 `./data`）下生成**超级管理员账户文件**
    `admin-account.json`；
 2. 编辑 `server.json`：至少配置一个 `roots` 条目（托管目录），按需改 `listen`/
@@ -108,6 +108,7 @@ store 层为工程内建（独立工程 filemanageDb 已并入、不再存在）
   "trashDir": "",                        // 无家目录用户的中央回收站回退位置
   "trashRetentionDays": 30,              // 回收站自动清理（需求4）
   "uploadStagingDir": "",                // 分片上传暂存
+  "maxUploadBytes": 0,                   // 单次上传大小硬上限（字节，0=不限）。0.2.8 起默认不限——历代 2GiB 默认让 >2GiB 文件必现 413（上传"彻底不能用"根因）；填正数即恢复限额（schemaVersion 11→12 仅升级历代默认字面量，自定义限额保留）
   "versions": { "enabled": true, "maxVersions": 10, "dir": "" },
   "session": { "accessTTL": "1h", "idleMinutes": 60, "idleDays": 21 },   // 管理台会话绝对时长 / 用户凭证滑动窗口（需求22；0.2.4 起 idleMinutes 优先、默认 1h，idleDays 弃用回退）
   // 三层认证图（0.2.3，需求2）：L1 进程内 LRU 上限与新鲜期 / L2 redis 条目上限 / 清扫与续期写回节奏
@@ -209,8 +210,13 @@ deploy/                  Docker / compose / nginx 样例
 
 ## 版本兼容
 
-见 `CHANGELOG.md` 兼容矩阵。当前基线：**Server 0.2.x（0.2.7）↔ Client 0.3.x
-（推荐 0.3.6）**——0.2.7 服务端日志为纯服务端可观测性增强（**`/api/v1` 数据协议零变更**，
-仅新增响应头 `X-Trace-Id`；对 Client 0.1.x–0.3.7 全系列无感兼容）。0.2.4 认证收敛（登录只回 `{token}`、refresh 删除、绑定会话查 `X-Client-Id` 头、滑动窗口 1h）为破坏批，旧客户端 ≤0.3.5 登录/刷新/
-分享/管理台全链路兼容（升级后存量令牌一次性失效、重登一次）。元数据层自含（无独立
-Db 工程）；旧配置启动时按 schemaVersion 自动迁移（当前链至 v11）。
+见 `CHANGELOG.md` 兼容矩阵。当前基线：**Server 0.2.x（0.2.8）↔ Client 0.3.x
+（推荐 0.3.8）**——0.2.8 上传限额默认批（`maxUploadBytes` 默认 2GiB→0=不限，修复 >2GiB
+文件 `POST /upload/session` 必现 413=用户报"上传彻底不能用"的根因；判定与 413 语义保留，
+显式限额时依旧生效；**`/api/v1` 数据协议与响应形状零变更**，对 Client 0.1.x–0.3.8 全系列
+无感兼容；config schemaVersion 11→12，migrate11to12 只升级"恰为历代默认字面量"的配置、
+用户自定义限额保留）。0.2.7 服务端日志为纯可观测性增强（新增响应头 `X-Trace-Id`）。0.2.4
+认证收敛（登录只回 `{token}`、refresh 删除、绑定会话查 `X-Client-Id` 头、滑动窗口 1h）为
+破坏批，旧客户端 ≤0.3.5 登录/刷新/分享/管理台全链路兼容（升级后存量令牌一次性失效、重登
+一次）。元数据层自含（无独立 Db 工程）；旧配置启动时按 schemaVersion 自动迁移（当前链至
+v12）。
