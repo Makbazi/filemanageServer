@@ -3,11 +3,13 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -15,11 +17,16 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"filemanageServer/internal/auth"
+	"filemanageServer/internal/logx"
 	store "filemanageServer/internal/store"
 )
 
 // userKey gin 上下文键：当前登录用户（*store.User）。
 const userKey = "fm.user"
+
+// traceKey gin 上下文键：本请求链路追踪 ID（traceGin 注入，
+// loggerGin/recoverGin/writeErr 的行首 "trace=" 均取自它）。
+const traceKey = "fm.trace"
 
 // errNoDB 降级模式统一错误（未配置元数据库时元数据端点返回 503）。
 var errNoDB = errors.New("metadata database not configured")
@@ -87,6 +94,15 @@ func (s *Server) authCtx() gin.HandlerFunc {
 		}
 		if e.Kind != store.AuthKindUser { // share 凭证走的是 /s/ 链路专用校验，永不代表身份
 			writeErr(c, http.StatusUnauthorized, errors.New("token invalid or expired"))
+			c.Abort()
+			return
+		}
+		// 0.2.4 客户端绑定核对：登录时携带 clientId 签发的凭证与该标识绑定，
+		// 逐请求 X-Client-Id 必须等值——缺失/不符=401（标识变了或是被冒用，
+		// 一律重新登录取新凭证）。未绑定会话（旧客户端/移动端/管理台，
+		// ClientID=""）不看头，行为同前；多客户端同账号各持己凭证互不挤占。
+		if e.ClientID != "" && c.Request.Header.Get("X-Client-Id") != e.ClientID {
+			writeErr(c, http.StatusUnauthorized, errors.New("client identity mismatch, please login again"))
 			c.Abort()
 			return
 		}
@@ -207,13 +223,107 @@ func (s *Server) adminIPFilter() gin.HandlerFunc {
 	}
 }
 
-// loggerGin 请求日志（格式与原 net/http logger 一致）。
+// traceGin 链路追踪（0.2.7）：优先取请求头 X-Trace-Id、其次 X-Request-Id
+// （客户端/网关透传串联跨进程链路），入头一律消毒——仅允许 [0-9A-Za-z._-]
+// 且 ≤64 字符，超长或含非法字符视为伪造噪声、重新生成；无头则用
+// crypto/rand 生成 16 位十六进制 ID。ID 存入 gin 上下文并回显到响应头
+// X-Trace-Id（响应体形状不变，仅加头——health 等既有契约零影响）。
+func traceGin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tid := sanitizeTraceID(c.Request.Header.Get("X-Trace-Id"))
+		if tid == "" {
+			tid = sanitizeTraceID(c.Request.Header.Get("X-Request-Id"))
+		}
+		if tid == "" {
+			b := make([]byte, 8)
+			if _, err := rand.Read(b); err != nil {
+				// crypto/rand 极端失败兜底：仍给出可用 ID（时间戳十六进制）
+				tid = fmt.Sprintf("%x", time.Now().UnixNano())
+			} else {
+				tid = hex.EncodeToString(b)
+			}
+		}
+		c.Set(traceKey, tid)
+		c.Header("X-Trace-Id", tid)
+		c.Next()
+	}
+}
+
+// sanitizeTraceID 校验并原样返回外部传入的 trace ID；非法即空（触发重新生成）。
+func sanitizeTraceID(s string) string {
+	if s == "" || len(s) > 64 {
+		return ""
+	}
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+			r == '.' || r == '_' || r == '-') {
+			return ""
+		}
+	}
+	return s
+}
+
+// traceOf 取当前请求的链路 ID（未挂 traceGin 的路径返回 ""，日志不带前缀）。
+func traceOf(c *gin.Context) string {
+	if v, ok := c.Get(traceKey); ok {
+		if s, _ := v.(string); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// loggerGin 请求日志（0.2.7 重构走 logx）：状态码分级 5xx=Error、4xx=Warn、
+// 其余=Info（默认等级 warn 下只留异常请求）；行格式
+// `trace=<id> <METHOD> <path?query> <status> <dur> from=<remote>`。
+// 敏感纪律：绝不记录请求头与请求体（凭证/口令只存在于二者之中）。
 func loggerGin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		c.Next()
-		log.Printf("%s %s %s (%s)", c.Request.Method, c.Request.URL.Path, c.Request.RemoteAddr,
-			time.Since(start).Round(time.Millisecond))
+		target := c.Request.URL.Path
+		if c.Request.URL.RawQuery != "" {
+			target += "?" + c.Request.URL.RawQuery
+		}
+		status := c.Writer.Status()
+		// 先组行再以常量格式 "%s" 传入：路径/查询来自客户端，可能含 % 动词，
+		// 绝不能再被当格式串二次解释（vet printf 检查同源约束）
+		line := fmt.Sprintf("%s %s %d %s from=%s", c.Request.Method, target, status,
+			time.Since(start).Round(time.Millisecond), c.Request.RemoteAddr)
+		tid := traceOf(c)
+		switch {
+		case status >= 500:
+			logx.ErrorT(tid, "%s", line)
+		case status >= 400:
+			logx.WarnT(tid, "%s", line)
+		default:
+			logx.InfoT(tid, "%s", line)
+		}
+	}
+}
+
+// recoverGin panic 兜底（0.2.7 新增——此前全仓无任何 recovery，handler panic
+// 会打死整个进程）：捕获后按错误等级记 trace+panic 值+截断堆栈，并按
+// respond.go 的错误信封回 500 {"error":"internal server error"}。
+// 堆栈截断 4KB、换行折叠为 " | "——保持"一行一条记录"的轮转文件形态。
+func recoverGin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if r := recover(); r != nil {
+				stack := debug.Stack()
+				if len(stack) > 4096 {
+					stack = stack[:4096]
+				}
+				logx.ErrorT(traceOf(c), "panic: %v | stack: %s", r,
+					strings.ReplaceAll(strings.TrimRight(string(stack), "\n"), "\n", " | "))
+				if !c.Writer.Written() {
+					// 与 respond.go 的 5xx 信封逐字一致（原始 panic 文案只进日志、不出响应）
+					writeJSON(c, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+				}
+				c.Abort()
+			}
+		}()
+		c.Next()
 	}
 }
 

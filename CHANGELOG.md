@@ -10,7 +10,8 @@
 
 | filemanageServer | 元数据存储 | 兼容 filemanageClient |
 |---|---|---|
-| 0.2.x（当前 **0.2.3**） | 自含（同 0.1.x；0.2.3 认证重构：新表 `auth_sessions`（幂等增量，四方言+file 驱动）、配置 schemaVersion 8→9（auth 段）、`golang-jwt` 依赖移除；旧 `sessions` 表冻结不再读写但保留磁盘兼容） | **Client 0.3.4 推荐基线**（认证协议字段形状零变更，0.3.4 与 0.1.x–0.3.3 全部客户端登录/刷新/分享/管理台全链路可用）；**一次性代价**：升级到本版本后所有既有 JWT 访问令牌/refresh 令牌/分享 st 令牌失效，各账户重新登录一次（此后行为与旧客户端完全一致）|
+| 0.2.x（当前 **0.2.9**；0.2.9=版本号对齐批——代码/协议/配置 schema/Store/go.mod 零变更，配套 Client 0.3.9 修复批，推荐位见下行） | 自含（同 0.2.4；0.2.8 上传限额默认值放宽：`maxUploadBytes` 默认 2GiB→**0=不限**（migrate11to12 恰好等于历代默认字面量 2147483648 的配置升为 0，用户显式自定义限额原样保留；schemaVersion 11→12；无新表/新列/新端点，go.mod 零变更）；0.2.7 服务端日志（log 段，schema 10→11）与 0.2.4 认证收敛、0.2.3 auth_sessions/去 JWT 沿用） | **`/api/v1` 数据协议零变更、响应形状零变更**——0.2.8 仅默认限额值变化（`POST /upload/session` 的 413 判定从"默认必现"变为"仅显式配置限额时"），兼容 Client 0.1.x–**0.3.8** 全系列一切历代版本；推荐基线为 **Client 0.3.8**（本批配套定版：大文件上传恢复+客户端 413 中文指引；0.3.6 起认证收敛语义全保留、0.3.7 起转码/恢复/渲染/批量/设置能力对协议零依赖）。旧客户端 0.1.x–0.3.5 与移动端**可用但降级**（会话未绑定不查头；refresh 401/404 退化重登；窗口同降 1h）。管理台内嵌前端兼容（保留 `{token,user}`）；`GET /thumb` JPEG/RAW 出图面 50MP/9000px 沿用|
+| 0.2.3 | 自含（同 0.1.x；0.2.3 认证重构：新表 `auth_sessions`（幂等增量，四方言+file 驱动）、配置 schemaVersion 8→9（auth 段）、`golang-jwt` 依赖移除；旧 `sessions` 表冻结不再读写但保留磁盘兼容） | Client 0.3.4（推荐位由 0.3.6 取代；认证协议字段形状零变更，0.1.x–0.3.4 登录/刷新/分享/管理台全链路可用）；**一次性代价**：升级到该版本时所有既有 JWT/refresh/分享 st 令牌失效，重登一次 |
 | 0.2.2 | 自含（同 0.1.x；仅 `GET /thumb` 白名单扩 BMP（thumbdec.go 纯标准库自实现），无新端点/新表/新列、schemaVersion 保持 8） | Client 0.3.3（服务端网格 BMP 出图=本地缩放机制）；Client 0.3.2/0.2.x 无感可用且 BMP 由 415 变 200 为纯增益面（旧客户端 size_hint 回退语义不变）；Client 0.1.x 及以下同 |
 | 0.2.1 | 自含（同 0.1.x；纯 API 面加性 `GET /thumb`+`POST /check` 与静默修复，无新表/新列、schemaVersion 保持 8） | **Client 0.3.2 完整功能（浏览零下载+目录重传预检依赖本版本端点）**；Client 0.2.0/0.3.x 早期版本全功能无感（不调用新端点即无感）；Client 0.1.x 及以下同 |
 | 0.2.0 | 自含（同 0.1.x；纯 API 面增项 `POST /api/v1/mkdirs`） | **Client 0.2.0 完整功能（目录上传）**；Client 0.1.x 及以下全功能无感（mkdirs 为加性端点，旧客户端不调用） |
@@ -42,6 +43,162 @@
   版本号落到 `"unknown"`。设 `FM_VERSION=x.y.z ./build.sh -a all` 可跳过 git 推导固定版本
   （此时也不追加 `-dirty`）；亦可在流水线先 `git fetch --tags --force`（浅克隆加
   `--unshallow`）并 `git config --global --add safe.directory "$WORKSPACE"` 让 tag 真正可用。
+
+## [0.2.9] - 2026-10-16（版本号对齐批：配套 Client 0.3.9 修复批；tag 由维护者打）
+
+### 说明（用户 2026-10-16 截图清单第 9 条版本变更指令）
+- **本批八项问题（渲染黑屏/转码假不可用/目录上传失败/批量勾选/批量上传/右键批量
+  上传/一次选目录批量下载/复制移动目录选择）经逐条实测定位，根因全部在客户端
+  本地行为**（渲染绘帧竞态、媒体缓存 LRU 误杀在服硬链条目、planDirUpload 形参错位
+  致 localPath 变相对路径、批量 UI 语义），服务端 `internal/` **零代码改动**。
+- 0.2.9 为**版本号对齐批**：`/api/v1` 协议/响应形状/配置 schema（v12）/Store/
+  go.mod 全部零变更，对一切客户端 0.1.x–**0.3.9** 与历代行为完全一致。
+  产物版本号照旧由 git tag 推导（`v0.2.9`），version.go 源码默认 "unknown" 不变。
+
+## [0.2.8] - 2026-10-16（上传修复：maxUploadBytes 默认 2GiB→不限；用户 2026-10-16 清单第 1/6 条；tag 由维护者打）
+
+### 修复（用户 2026-10-16 清单第 1 条"上传功能彻底不能用"的根因）
+- **现象**：`POST /api/v1/upload/session` 对超过 2GiB 的文件一律 413
+  （`size N exceeds maxUploadBytes 2147483648`），目录组上传中该文件反复重试反复 413、
+  断点恢复同撞——用户感知即"上传彻底不可用"（实测复现：小于限额建会话 201/整链路可用，
+  大于限额必 413；413 只可能来自 `handleUploadSessionCreate`/整文件 `handleUpload` 两处
+  maxUploadBytes 判定）。2GiB 默认对"视频/RAW 归档"这一本产品的核心场景过紧。
+- **修复**：`maxUploadBytes` 默认值改为 **0=不限**（DefaultConfig/示例配置同步）；
+  判定逻辑与 413 语义**原样保留**——显式配置正数限额时行为不变（需要收紧的部署照常
+  可配）。整文件通道（`WriteFileAtomicLimit`）与分片会话创建两处同受该值控制。
+- **配置迁移（需求25）**：schemaVersion **11→12**，`migrate11to12`：
+  键缺失→补 0（新默认）；值**恰为历代默认字面量 2147483648**（v4 起 DefaultConfig、
+  示例配置与 migrate3to4 写入的同一串）→升为 0（把"从未被用户显式决定的默认值"升级，
+  不丢任何用户自定义限额——自定义值一律原样保留）；旧配置文件照例自动备份。
+- **兼容**：`/api/v1` **数据协议零变更、响应形状零变更**——对一切客户端 0.1.x–0.3.8
+  无感；配 ≤0.2.7 旧服务端时 Client 0.3.8 另把 413 报错改写为中文可操作指引。
+- 验证：`go build ./... && go vet ./...` 通过；迁移冒烟：v11 配置（含默认 2GiB 字面量）
+  启动自动升 12 并解除限额、显式限额保留。
+
+## [0.2.7] - 2026-10-14（服务端日志：轮转文件 + 链路追踪 + 等级可配 + 敏感信息纪律；用户 2026-10-14 清单第 4 条；跳号 0.2.4→0.2.7 系维护者定版指令；tag 由维护者打）
+
+### 新增（internal/logx，标准库 log/slog，零新依赖、go.mod/go.sum 不变）
+- **日志文件**：`<logDir>/filemanage-server.log` 按大小轮转（写前判长、越过上限才轮转），
+  改名链 `.log.1`/`.log.2`（oldest-first、溢出删除）——**含当前文件在内最多 3 个、单文件
+  ≤10MB（均可配）**；互斥守护写入，slog 文本 Handler 一行一条记录；重启续写既有文件并
+  从实际大小累计，绝不让单文件超限。同时 **io.MultiWriter 镜像 stdout**（前台/容器部署直读）。
+- **等级可配**：`log.level = debug|info|warn|error`，**默认 warn**（未知取值收敛为 warn，
+  不因配置笔误拒绝启动）；printf 风格 `logx.Debug/Info/Warn/Error` 与链路变体
+  `DebugT/InfoT/WarnT/ErrorT`（行首 `trace=<id>`）。
+- **stdlib log 桥接**：Setup 后 `log.SetFlags(0)`+`log.SetOutput` 把存量 `log.Printf`
+  逐行按 **INFO** 送进 slog（时间戳由 slog 统一添加），生命周期横幅/计数行经桥接在默认
+  warn 下不再显示——**刻意降噪，符合"默认等级 warn"需求**；错误/告警面按下列改造显式转
+  logx 保持默认可见。
+- **敏感信息纪律（需求6 底线延伸）**：**绝不记录请求体、Authorization 等任何请求头、
+  口令、令牌值**；请求日志只含 方法/路径?查询/状态/耗时/来源 IP 与 trace。main.go 首启
+  超管明文口令改为 `fmt.Printf` **只回显控制台、不入日志文件**（需求4）；auth L2 撤权重试
+  行仅含 SHA-256 摘要 8 位前缀（非凭证值）。
+
+### 新增（请求链路追踪与 panic 兜底，internal/api）
+- `traceGin()`：取请求头 `X-Trace-Id`（其次 `X-Request-Id`），入头消毒（≤64 字符且仅
+  `[0-9A-Za-z._-]`，非法视为伪造重新生成），无头则 crypto/rand 生成 16 位十六进制 ID；
+  存 gin 上下文并**回显响应头 `X-Trace-Id`**（响应体形状零变更，health 等既有契约不动）。
+- `loggerGin()` 重写走 logx：5xx=Error、4xx=Warn、其余=Info，行格式
+  `trace=<id> <METHOD> <path?query> <status> <dur> from=<remote>`（先组行再以常量格式
+  传入，路径含 `%` 动词不会被二次解释——vet printf 检查同项约束）。
+- `recoverGin()`（**全仓此前无任何 recovery，handler panic 会打死进程**）：捕获后按
+  Error 记 trace+panic 值+截断 4KB 堆栈（换行折叠保持单行形态），按 respond.go 信封回
+  `500 {"error":"internal server error"}`（原始 panic 文案只进日志不出响应）。
+- 两引擎统一挂载（`newEngine` 装配点）：链序 recover → trace → logger → 网络准入 →
+  qps → cors；用户口与管理口同享。`-mode balancer` 同样 `logx.Setup`（其 stdlib 请求行
+  经桥接落同一轮转文件）。
+
+### 改造（真实错误/告警站点转 logx，默认等级下保持可见）
+- `respond.go` internal error → `logx.ErrorT`（带 trace；499 断连行**刻意保留** stdlib
+  log=桥接 INFO——0.2.1"网络常态不刷错误"契约不变）；`server.go` 审计写入失败 →
+  `logx.WarnT`；`v1_auth.go` logout 撤权失败、`v1_dbconfig.go` cache flush/ensure
+  homes 失败 → `logx.WarnT`；`auth/center.go` L2 redis 不可达/读写/撤权失败/续期写回
+  失败 → `logx.Warn`；`transfer/chunks.go` complete 标记/暂存清理失败、
+  `fileops/cleaner.go` trash/sessions/audit/uploads 清理失败 → `logx.Warn`。
+- main.go 与 store/balancer 生命周期行维持桥接（INFO，默认不可见）。
+
+### 配置（需求25：schemaVersion 10→11）
+- 新增 `log` 段：`{"level":"warn","dir":"","maxMB":10,"maxFiles":3}`（dir 空=
+  `<dataDir>/logs`；finalize 钳制：非法等级→warn、maxMB≤0→10、maxFiles<1→3、>10→10）；
+  访问器 `LogDir()`；示例配置与 `DefaultConfig` 同步带出。
+- `migrate10to11` 只补缺不覆盖（存量显式 log 段原样保留，段内缺键由默认值兜底）；
+  迁移备份/未知字段保留纪律沿用；文档注释 schemaVersion 修正为 11。
+
+### 验证
+- `go build ./... && go vet ./...` ✓、gofmt 干净。
+- 冒烟：首启示例配置含 log 段（schemaVersion 11）✓；`GET /health` 响应头 `X-Trace-Id`
+  出现、body 键与历代一致 ✓；`/api/v1/nonexistent` → 日志文件出现同 trace 的 WARN 行 ✓；
+  外部传入 `X-Trace-Id`/`X-Request-Id` 合法即回显、含空格等非法字符重新生成 ✓；默认
+  warn 启动横幅不入日志，level=info 重启后可见 ✓；level=info+maxMB=1 突发 3 万请求 →
+  恰 3 个文件、轮转件各 ≤1MB（oldest 溢出删除）✓；首启超管明文口令仅出现在 stdout、
+  日志文件零命中 ✓；v10 配置（无 log 段、listen 自定义）启动自动升 v11 补默认 log 段、
+  自定义值存活、`.bak-<时间戳>` 备份 ✓。
+
+### 兼容
+- **`/api/v1` 数据协议零变更**：登录/健康/列表/上传/分享等全部响应体与状态码不动，
+  仅新增响应头 `X-Trace-Id`——对一切客户端（**Client 0.1.x–0.3.7**）无感、无解析依赖；
+  管理台与内嵌前端同。配置 schemaVersion 10→11 只补缺不覆盖（需求25），旧配置升级
+  零丢值；无新表/新列、Store 接口零变更、go.mod/go.sum 零变更（纯标准库实现）。
+
+## [0.2.4] - 2026-10-12（认证响应面收敛：单凭证 + 客户端唯一标识绑定 + 1h 滑动窗口；缩略图 JPEG 出图面扩至 50MP；用户 2026-10-12 清单第 2/3 条；tag 由维护者打）
+
+### 破坏性变更（认证契约；未发布系列经维护者确认直接修改 /api/v1，本批版本线 Server 0.2.4 ↔ Client 0.3.6）
+- `POST /api/v1/auth/login` 用户端口响应**只回 `{"token"}`**：删除 accessToken/refreshToken/
+  expiresIn 兼容别名与 user 概要回显——身份/角色/有效期全存服务端认证图（需求34"身份隐藏
+  贯彻到凭证层"的最终形态；客户端对凭证从无格式假设）。管理台登录（admin 端口，
+  adminModeKey）保留 `{"token","user"}`——控制台进入门禁与顶栏依赖 user.role（维护者确认：
+  仅裁客户端面）。`PUT /admin/super` 响应同步删除 accessToken/expiresIn 别名（控制台只读
+  token/username）。`GET /auth/me` 收敛为仅回 `{username}`——角色/档案（id/role/
+  allowedRoots/createdAt）不再对客户端可见：客户端只持 token，可查询的仅服务端基本信息
+  （health/版本发现）与业务数据（roots 清单），身份与权限判定完全在服务端认证图+jail 内
+  闭环；旧客户端/移动端读取 role 的分支落各自默认值，无害降级（桌面 ≤0.3.5 恒显「普通
+  用户」、移动端 MeInfo.role 空串且解析全带缺省不崩；Client 0.3.6 起账户页不再调用本端点）。
+- **移除 `POST /auth/refresh`**（路由删除，请求落 404）：活跃滑动续期由服务端无感完成
+  （authCtx→Touch，续期过程中凭证字符串永不变化），"重新验证才换凭证"即重登语义。
+  旧客户端（≤0.3.5）与移动端既有 401→refresh 链路自然失败后**退化为"过期即重登"**
+  （登录对话框承接，无新增协议面）。
+- **客户端唯一标识（client ID）绑定**：登录请求新增可选 `clientId`（≤64 字符，超长 400）；
+  `auth_sessions` 新增列 `client_id` 持久化（四方言 CREATE 含列；存量 0.2.3 库 `Migrate()` 后
+  幂等加列守卫——sqlite `PRAGMA table_info` 探查后 ALTER、mysql information_schema 探查后
+  ALTER、pg `ADD COLUMN IF NOT EXISTS`；file 驱动 JSON 行天然加性，旧行解出空串=未绑定）。
+  绑定会话**逐请求核对 `X-Client-Id` 头**：缺失/不符=401（须重新登录）。未绑定会话
+  （旧客户端/移动端/管理台/超管——登录未带 clientId）不看头，行为同前。多客户端同账号
+  各持己凭证**互不挤占**（登录从不吊销其他会话——既有语义保持并明示）。
+- **用户会话滑动窗口 21 天 → 1 小时**：配置新增 `session.idleMinutes`（默认 60）；
+  `IdleDuration()` IdleMinutes>0 优先、否则回退弃用字段 idleDays。**schemaVersion 9→10**
+  （migrate9to10 只补缺不覆盖、配置备份纪律沿用）。闲置超 1h、或客户端主动登出/正常退出
+  （Client 0.3.6 退出前尽力 logout）均需重新登录；管理台/超管绝对 accessTTL 1h 不滑动不变。
+  `POST /auth/logout` 接受 `{token}`（兼容读取旧字段 refreshToken；两者皆无则撤销
+  Authorization 头中的当前凭证——路由本要求登录态）。
+
+### 修复/改进（缩略图面：配合 Client 0.3.6"浏览零整文件"，服务端出图能力扩展）
+- thumbdec.go JPEG（含相机 RAW 内嵌预览）改走 **YCbCr 平面盒式直降采样**（Y=盒整数均值、
+  色度=盒中心采样、灰度直出；无全幅 RGBA 中间层，~1.5B/px）：专用闸门
+  **`thumbMaxPixelsJpeg=50MP` / `thumbMaxSideJpeg=9000px`**——48MP 手机主摄原图直接拿到
+  几十 KB 服务端缩略图（旧 12MP 闸门令其整批 415，被客户端当作"整文件静默下载兜底"触发
+  浏览带宽爆满——本批用户清单第 2 条的服务侧治本项）。PNG/GIF/BMP 维持 RGBA 链路
+  12MP/6000px；CMYK 等异常 JPEG 形态保守按 12MP；415/413/404 响应语义不变（Client
+  0.3.6 一律落图标）。解码峰值明示：JPEG ≈ 平面 75MB+输入 64MiB/slot、PNG/GIF/BMP ≈
+  48MB/slot，并发槽 ≤4。
+
+### 验证
+- `go build ./... && go vet ./...` ✓、gofmt 干净。
+- 冒烟（file + sqlite3 双引擎）：v9→v10 迁移补 `session.idleMinutes=60` ✓；用户端口登录
+  仅 `{token}` ✓；管理台登录 `{token,user}` ✓；绑定凭证 正确头 200 / 缺头 401 / 错头 401，
+  未绑定会话不查头 200 ✓；同账号两凭证并存互不吊销 ✓；logout 撤销当前凭证后 401、
+  其他会话不受影响 ✓；`/auth/refresh` 404 ✓；存量无 client_id 列的 sqlite3 库启动自动
+  补列、新登录落列值 ✓；24MP JPEG `GET /thumb` 200（512px ≈60KB）、15MP PNG 415、
+  `w=1024` 出图 ✓。
+
+### 兼容
+- **Client 0.3.6 为本批完整语义推荐基线**（单凭证存取/标识绑定/401 自动重登/退出登出/
+  浏览零整文件均为配套客户端行为）。旧客户端 0.1.x–0.3.5 与移动端**可用但降级**：不送
+  clientId（会话未绑定、不查头）、登录响应无 refreshToken（其既有"无 rt 即过期重登"分支
+  承接）、refresh 端点消失（401→重登）、滑动窗口同样缩至 1h（服务端策略统一生效）。
+  升级一次性代价：存量会话沿用（未绑定、随新策略到期节奏）；管理台内嵌前端与本版形状
+  兼容（仅读 token/username）。
+
+
 
 ## [0.2.3] - 2026-10-09（认证重构：去 JWT，服务端三层认证图；本批用户清单第 2 条；tag 由维护者打）
 

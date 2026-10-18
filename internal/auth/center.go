@@ -27,6 +27,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"filemanageServer/internal/logx"
 	store "filemanageServer/internal/store"
 )
 
@@ -61,8 +62,10 @@ type Spec struct {
 	Super    bool
 	Gen      int64  // 超管凭据纪元（authCtx 逐请求核对）
 	Ref      string // share：绑定的链接 token
-	TTL      time.Duration
-	Persist  bool // false=仅 L1(+L2)：降级模式超管登录（对齐旧行为，重启即失效）
+	ClientID string // 0.2.4：客户端唯一标识（kind=user 且非空=绑定，逐请求核对
+	// X-Client-Id 头；空=未绑定——旧客户端/移动端/管理台会话）
+	TTL     time.Duration
+	Persist bool // false=仅 L1(+L2)：降级模式超管登录（对齐旧行为，重启即失效）
 }
 
 // Center 认证中心。对外方法均并发安全；锁只护 L1 纯内存操作，所有 I/O 在锁外。
@@ -105,6 +108,7 @@ type wireEntry struct {
 	Super      bool      `json:"super"`
 	Gen        int64     `json:"gen"`
 	Ref        string    `json:"ref"`
+	ClientID   string    `json:"clientId"`
 	ExpiresAt  time.Time `json:"expiresAt"`
 	LastUsedAt time.Time `json:"lastUsedAt"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -112,13 +116,13 @@ type wireEntry struct {
 
 func toWire(e *store.AuthSession) wireEntry {
 	return wireEntry{ID: e.ID, Kind: e.Kind, UserID: e.UserID, Username: e.Username,
-		Role: e.Role, Super: e.Super, Gen: e.Gen, Ref: e.Ref,
+		Role: e.Role, Super: e.Super, Gen: e.Gen, Ref: e.Ref, ClientID: e.ClientID,
 		ExpiresAt: e.ExpiresAt, LastUsedAt: e.LastUsedAt, CreatedAt: e.CreatedAt}
 }
 
 func (w wireEntry) session(hash string) *store.AuthSession {
 	return &store.AuthSession{ID: w.ID, Kind: w.Kind, UserID: w.UserID, Username: w.Username,
-		Role: w.Role, Super: w.Super, Gen: w.Gen, Ref: w.Ref, TokenHash: hash,
+		Role: w.Role, Super: w.Super, Gen: w.Gen, Ref: w.Ref, ClientID: w.ClientID, TokenHash: hash,
 		ExpiresAt: w.ExpiresAt, LastUsedAt: w.LastUsedAt, CreatedAt: w.CreatedAt}
 }
 
@@ -156,7 +160,8 @@ func New(opt Options) (*Center, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := c.rdb.Ping(ctx).Err(); err != nil {
-			log.Printf("auth: warn: L2 redis 启动不可达（%v）——先以 L1+持久层工作，读写路径自动重试", err)
+			// 0.2.7：真实运行故障走 logx.Warn（默认等级 warn 下可见；不含任何凭证值）
+			logx.Warn("auth: warn: L2 redis 启动不可达（%v）——先以 L1+持久层工作，读写路径自动重试", err)
 		}
 	}
 	return c, nil
@@ -239,7 +244,7 @@ func (c *Center) l2Put(ctx context.Context, e *store.AuthSession) {
 		pipe.Expire(ctx, skey, ttl) // 集合生命周期随最新条目滚动延长；残留指针由 RevokeUser 的 EXISTS 核验自清
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
-		log.Printf("auth: warn: L2 put: %v", err) // L3 是事实源，L2 写失败不致命（读路径会回源）
+		logx.Warn("auth: warn: L2 put: %v", err) // L3 是事实源，L2 写失败不致命（读路径会回源）
 	}
 }
 
@@ -255,7 +260,7 @@ func (c *Center) l2Get(ctx context.Context, hash string) (*store.AuthSession, bo
 		return nil, false
 	}
 	if err != nil {
-		log.Printf("auth: warn: L2 get: %v（回落持久层）", err)
+		logx.Warn("auth: warn: L2 get: %v（回落持久层）", err)
 		return nil, false
 	}
 	var w wireEntry
@@ -320,7 +325,7 @@ func (c *Center) Issue(ctx context.Context, sp Spec) (string, error) {
 	}
 	now := time.Now()
 	e := &store.AuthSession{Kind: sp.Kind, UserID: sp.UserID, Username: sp.Username,
-		Role: sp.Role, Super: sp.Super, Gen: sp.Gen, Ref: sp.Ref, TokenHash: hash,
+		Role: sp.Role, Super: sp.Super, Gen: sp.Gen, Ref: sp.Ref, ClientID: sp.ClientID, TokenHash: hash,
 		ExpiresAt: now.Add(sp.TTL), LastUsedAt: now, CreatedAt: now}
 	if sp.Persist {
 		if err := c.st.CreateAuthSession(e); err != nil {
@@ -438,7 +443,8 @@ func (c *Center) revokeTail(ctx context.Context, hash string, uid int64, kind st
 		return nil
 	}
 	if lerr := c.l2Delete(ctx, hash, uid, kind); lerr != nil {
-		log.Printf("auth: warn: L2 撤权失败（%v），清扫器重试 hash=%s…", lerr, hash[:8])
+		// hash 是 SHA-256 摘要前缀（非凭证值本身），仅作撤权重试定位线索
+		logx.Warn("auth: warn: L2 撤权失败（%v），清扫器重试 hash=%s…", lerr, hash[:8])
 		return nil // L3 已删=事实源已撤：他实例回源即拒；本地 pendingRevoke 兜底
 	}
 	c.mu.Lock()
@@ -567,7 +573,7 @@ func (c *Center) sweep(ctx context.Context) {
 					c.expireAll(ctx, &e)
 					continue
 				}
-				log.Printf("auth: warn: 续期写回失败（下轮重试）: %v", err)
+				logx.Warn("auth: warn: 续期写回失败（下轮重试）: %v", err)
 				continue
 			}
 		}

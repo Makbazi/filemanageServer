@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"filemanageServer/internal/logx"
 	store "filemanageServer/internal/store"
 )
 
@@ -48,20 +49,22 @@ func (c *Cleaner) runOnce() {
 		c.sweepStaging(nil)
 		return
 	}
+	// 0.2.7：清理失败是真实故障（下一轮虽会重试，但持续失败须让运维看到），
+	// 走 logx.Warn——默认等级 warn 下可见；成功计数行仍按生命周期 INFO 桥接。
 	if n, err := c.cleanTrash(); err != nil {
-		log.Printf("cleaner: trash: %v", err)
+		logx.Warn("cleaner: trash: %v", err)
 	} else if n > 0 {
 		log.Printf("cleaner: 已自动清理 %d 条超过保留期的回收站条目", n)
 	}
 	if err := c.Store.DeleteExpiredSessions(time.Now()); err != nil {
-		log.Printf("cleaner: sessions: %v", err)
+		logx.Warn("cleaner: sessions: %v", err)
 	}
 	// 审计日志保留 90 天
 	if err := c.Store.DeleteAuditBefore(time.Now().Add(-90 * 24 * time.Hour)); err != nil {
-		log.Printf("cleaner: audit: %v", err)
+		logx.Warn("cleaner: audit: %v", err)
 	}
 	if n, err := c.cleanUploadSessions(); err != nil {
-		log.Printf("cleaner: uploads: %v", err)
+		logx.Warn("cleaner: uploads: %v", err)
 	} else if n > 0 {
 		log.Printf("cleaner: 已清理 %d 个失效上传会话", n)
 	}
@@ -78,7 +81,7 @@ func (c *Cleaner) cleanTrash() (int, error) {
 	for _, it := range items {
 		c.removeTrashBlob(it)
 		if err := c.Store.RemoveTrashItem(it.UserID, it.TrashID); err != nil {
-			log.Printf("cleaner: remove trash record %s: %v", it.TrashID, err)
+			logx.Warn("cleaner: remove trash record %s: %v", it.TrashID, err)
 			continue
 		}
 		n++

@@ -11,11 +11,11 @@ import (
 // CurrentSchema 当前配置 schema 版本。
 // 每次配置结构发生不兼容变化时 +1，并在下方追加对应迁移函数（需求25：
 // 服务端安全升级——旧配置文件自动迁移、原文件备份、未知字段保留）。
-const CurrentSchema = 9
+const CurrentSchema = 12
 
-// MigrateMap 对通用 map 形式的配置执行迁移链 v1→…→v8→v9，返回是否发生变化。
+// MigrateMap 对通用 map 形式的配置执行迁移链 v1→…→v11→v12，返回是否发生变化。
 // 缺失 schemaVersion 的旧配置视为 v1（v1–v7 为基线前内部迭代、从未发布；
-// v8 自 0.1.0 起、v9 自 0.2.3 起）。
+// v8 自 0.1.0 起、v9 自 0.2.3 起、v10 自 0.2.4 起、v11 自 0.2.7 起、v12 自 0.2.8 起）。
 func MigrateMap(m map[string]any) (bool, error) {
 	ver := 1
 	if v, ok := m["schemaVersion"].(float64); ok && v > 0 {
@@ -51,6 +51,15 @@ func MigrateMap(m map[string]any) (bool, error) {
 		case 8:
 			changed = migrate8to9(m) || changed
 			ver = 9
+		case 9:
+			changed = migrate9to10(m) || changed
+			ver = 10
+		case 10:
+			changed = migrate10to11(m) || changed
+			ver = 11
+		case 11:
+			changed = migrate11to12(m) || changed
+			ver = 12
 		default:
 			return changed, fmt.Errorf("no migration path from schemaVersion %d", ver)
 		}
@@ -191,6 +200,57 @@ func migrate8to9(m map[string]any) bool {
 	if _, ok := m["auth"]; !ok {
 		m["auth"] = map[string]any{"memMaxEntries": 200000, "memTTL": "5m",
 			"redisMaxEntries": 5000000, "sweepInterval": "10m", "touchWriteEvery": "10m"}
+		return true
+	}
+	return false
+}
+
+// migrate9to10 v9（0.2.3）→ v10（0.2.4）：session 段新增 idleMinutes——客户端
+// 用户会话滑动闲置窗口收敛为 **60 分钟**（需求22 微调：活跃即无感续命，1h 无
+// 活动需重新登录；凭证字符串在续期中不变）。只补缺不覆盖；idleDays 保留为
+// 弃用字段（IdleMinutes>0 时不参与判定），存量显式设置不被改写。
+func migrate9to10(m map[string]any) bool {
+	sess, ok := m["session"].(map[string]any)
+	if !ok {
+		m["session"] = map[string]any{"accessTTL": "1h", "idleDays": 21, "idleMinutes": 60}
+		return true
+	}
+	if _, ok := sess["idleMinutes"]; !ok {
+		sess["idleMinutes"] = 60
+		return true
+	}
+	return false
+}
+
+// migrate10to11 v10（0.2.4–0.2.6）→ v11（0.2.7）：新增 log 段（服务端日志，
+// 见 internal/logx）——等级默认 warn、目录空=<dataDir>/logs、单文件 ≤10MB、
+// 含当前文件最多 3 个按大小轮转。只补缺不覆盖（需求25）；存量显式段原样保留，
+// 段内个别键缺失由 finalize 默认值兜底。
+func migrate10to11(m map[string]any) bool {
+	if _, ok := m["log"]; !ok {
+		m["log"] = map[string]any{"level": "warn", "dir": "", "maxMB": 10, "maxFiles": 3}
+		return true
+	}
+	return false
+}
+
+// migrate11to12 v11（0.2.7）→ v12（0.2.8）：上传大小上限默认值放宽（修"大文件
+// 上传一律 413"——2 GiB 默认硬上限让视频/RAW 批量归档彻底传不上去）。
+// maxUploadBytes 语义不变（0=不限），但默认不再是 2GiB：
+//   - 值恰为历代默认 2147483648（v4 起 DefaultConfig/示例配置/migrate3to4 写入的
+//     同一字面量）→ 归一为 0（不限）。这是把"从未被用户显式决定的默认值"升级，
+//     不丢任何用户自定义限额；
+//   - 键缺失 → 直接补 0（新默认，不限）；
+//   - 其余取值一律原样保留（用户显式配置的限额继续生效，超限仍 413）。
+// 需要重新收紧的部署：显式写回正数限额即可（整文件通道与分片会话创建同判）。
+func migrate11to12(m map[string]any) bool {
+	v, ok := m["maxUploadBytes"]
+	if !ok {
+		m["maxUploadBytes"] = float64(0)
+		return true
+	}
+	if f, isNum := v.(float64); isNum && f == 2147483648 {
+		m["maxUploadBytes"] = float64(0)
 		return true
 	}
 	return false

@@ -120,7 +120,8 @@ func (s *Server) handleUpload(c *gin.Context) {
 		writeErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	// 整文件大小硬上限（maxUploadBytes，0=不限；超限 413，不落地半成品）
+	// 整文件大小硬上限（maxUploadBytes；0.2.8 起默认 0=不限，仅显式配置限额时
+	// 超限 413，不落地半成品）
 	n, err := fileops.WriteFileAtomicLimit(sc.Abs, body, s.Cfg.MaxUploadBytes)
 	if err != nil {
 		writeErr(c, statusOf(err), err)

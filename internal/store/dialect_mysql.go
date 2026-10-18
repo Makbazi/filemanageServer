@@ -12,6 +12,12 @@
 // 大小写不敏感（username/token 等 UNIQUE 判定与 sqlite/pg 不同）。
 package store
 
+import (
+	"fmt"
+
+	"gorm.io/gorm"
+)
+
 const mysqlTail = " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
 
 func mysqlDDL() []string {
@@ -108,9 +114,28 @@ func mysqlDDL() []string {
 			kind VARCHAR(16) NOT NULL DEFAULT 'user', user_id BIGINT NOT NULL,
 			username VARCHAR(64) NOT NULL DEFAULT '', role VARCHAR(16) NOT NULL DEFAULT '',
 			super TINYINT NOT NULL DEFAULT 0, gen BIGINT NOT NULL DEFAULT 0,
-			ref VARCHAR(128) NOT NULL DEFAULT '', token_hash VARCHAR(128) NOT NULL UNIQUE,
+			ref VARCHAR(128) NOT NULL DEFAULT '', client_id VARCHAR(64) NOT NULL DEFAULT '',
+			token_hash VARCHAR(128) NOT NULL UNIQUE,
 			expires_at DATETIME(3) NOT NULL, last_used_at DATETIME(3) NOT NULL,
 			created_at DATETIME(3) NOT NULL,
 			KEY idx_authsess_exp (expires_at))` + mysqlTail,
 	}
+}
+
+// mysqlEnsureExtra 存量库加列守卫（0.2.4 auth_sessions.client_id；只增不改，
+// 属幂等 DDL 清单的组成部分——MySQL 不支持 ADD COLUMN IF NOT EXISTS，先查
+// information_schema 再 ALTER）。
+func mysqlEnsureExtra(db *gorm.DB) error {
+	var cnt int64
+	err := db.Raw("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'auth_sessions' AND column_name = 'client_id'").
+		Scan(&cnt).Error
+	if err != nil {
+		return fmt.Errorf("migrate: probe client_id: %w", err)
+	}
+	if cnt == 0 {
+		if err := db.Exec("ALTER TABLE auth_sessions ADD COLUMN client_id VARCHAR(64) NOT NULL DEFAULT ''").Error; err != nil {
+			return fmt.Errorf("migrate: add client_id: %w", err)
+		}
+	}
+	return nil
 }

@@ -72,8 +72,10 @@ func (s *Server) newEngine(netGuard gin.HandlerFunc, extra ...gin.HandlerFunc) *
 	e.NoMethod(func(c *gin.Context) {
 		writeErr(c, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 	})
-	// 全局中间件顺序：logger 最外 → 网络准入 → QPS → CORS →（管理端口）adminScope → 业务
-	e.Use(loggerGin(), netGuard, s.qpsLimit(), s.corsGin())
+	// 全局中间件顺序（0.2.7 日志批）：recover 最外（兜住其后一切 panic）→ trace
+	// （先于 logger，保证每条请求日志带链路 ID）→ logger → 网络准入 → QPS → CORS
+	// →（管理端口）adminScope → 业务。两引擎（Handler/AdminHandler）共用本装配。
+	e.Use(recoverGin(), traceGin(), loggerGin(), netGuard, s.qpsLimit(), s.corsGin())
 	for _, h := range extra {
 		e.Use(h)
 	}
@@ -115,7 +117,8 @@ func (s *Server) registerV1(e *gin.Engine) {
 	// 降级模式管理台必须能登录；普通账户在 handler 内判无库 → 503（errNoDB）。
 	// 引导注册端点随文件超管模型移除（管理员由超管在管理台创建，需求33）。
 	v1.POST("/auth/login", s.handleLogin)
-	v1.POST("/auth/refresh", s.requireDB(), s.handleRefresh)
+	// 0.2.4：/auth/refresh 移除——滑动续期由 authCtx→Touch 服务端无感完成，
+	// 凭证只在重新登录时更换（旧客户端 refresh 退化=401 重登，兼容矩阵已明示）。
 
 	// ---- 分享链接匿名访问（需求7，凭 token+密码，无需登录）----
 	shr := e.Group("/s/:token", s.maintenanceGate(), s.requireDB())

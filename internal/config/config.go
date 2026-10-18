@@ -40,13 +40,17 @@ type TLSCfg struct {
 	AutoSelfSign bool   `json:"autoSelfSign"`
 }
 
-// SessionCfg 会话策略（需求22，0.2.3 起语义微调——不再有 JWT 访问令牌）：
+// SessionCfg 会话策略（需求22，0.2.3 起语义微调——不再有 JWT 访问令牌；
+// 0.2.4 起滑动窗口收敛为分钟级）：
 // AccessTTL = 管理台会话（超管/DB 管理员）绝对有效期（默认 1h，不滑动——
-// 保持"控制台每小时重登"节奏）；IdleDays = 客户端用户会话的滑动闲置窗口
-// （默认 21 天 = 3 周，每次认证请求自动续期，超过未使用必须重新登录）。
+// 保持"控制台每小时重登"节奏）；IdleMinutes = 客户端用户会话的滑动闲置窗口
+// （0.2.4 起默认 **60 分钟**：活跃即无感续命、超过 1h 未使用必须重新登录，
+// 凭证字符串在续期中永不变化）；IdleDays 为旧窗口字段（21 天），已弃用——
+// 仅为存量 v9 配置兼容保留，IdleMinutes>0 时一律以 IdleMinutes 为准。
 type SessionCfg struct {
-	AccessTTL string `json:"accessTTL"`
-	IdleDays  int    `json:"idleDays"`
+	AccessTTL   string `json:"accessTTL"`
+	IdleDays    int    `json:"idleDays"`
+	IdleMinutes int    `json:"idleMinutes"`
 }
 
 // AuthCfg 三层认证图容量与节奏（0.2.3，替代 JWT 方案；见 internal/auth/center.go）：
@@ -108,6 +112,17 @@ type BalancerCfg struct {
 	Workers []string `json:"workers"`
 }
 
+// LogConf 服务端日志（0.2.7，见 internal/logx）：等级/目录/轮转上限。
+// 落盘文件含当前文件在内最多 MaxFiles 个（默认 3）、每个 ≤ MaxMB MB（默认 10），
+// 按大小轮转改名链 .log.1/.log.2/…；stdout 同步镜像。敏感值（口令/令牌/
+// 请求体/头）永不入日志——纪律见 logx 包注释，等级默认 warn。
+type LogConf struct {
+	Level    string `json:"level"`    // debug|info|warn|error，默认 warn
+	Dir      string `json:"dir"`      // 空=dataDir/logs
+	MaxMB    int    `json:"maxMB"`    // 单文件上限 MB，默认 10
+	MaxFiles int    `json:"maxFiles"` // 最多保留文件数（含当前），默认 3
+}
+
 // DBCfg 元数据库配置。Driver 取值：
 // "file"（含别名 ""/"none"，0.1.1 起为默认：未配置数据库时使用内置文件存储，
 // DSN=存储目录，留空派生 <dataDir>/filestore，全功能可用、仅单实例）|
@@ -135,7 +150,7 @@ type RedisCfg struct {
 	ACLTTLSeconds  int    `json:"aclTTLSeconds"`  // 默认 60
 }
 
-// Config 服务端配置（schemaVersion=9）。
+// Config 服务端配置（schemaVersion=12）。
 type Config struct {
 	SchemaVersion int `json:"schemaVersion"`
 
@@ -173,13 +188,14 @@ type Config struct {
 	TrashDir           string    `json:"trashDir"`
 	UploadStagingDir   string    `json:"uploadStagingDir"`   // 分片上传暂存目录（多实例需共享）
 	TrashRetentionDays int       `json:"trashRetentionDays"` // 回收站保留天数（需求4），默认 30
-	MaxUploadBytes     int64     `json:"maxUploadBytes"`     // 单次上传大小硬上限（字节，0=不限），默认 2GiB
+	MaxUploadBytes     int64     `json:"maxUploadBytes"`     // 单次上传大小硬上限（字节，0=不限）。0.2.8 起默认 0=不限（旧 2GiB 默认让视频/RAW 归档一律 413，见 migrate11to12）；显式配置正数即恢复限额
 	AdminPassword      string    `json:"adminPassword"`      // 超管口令重置触发器（需求32，0.1.0）：非空=启动时以其为明文重置超管账户文件，用后清空
 
 	AI        AICfg        `json:"ai"`
 	TLS       TLSCfg       `json:"tls"`
 	Session   SessionCfg   `json:"session"`
 	Auth      AuthCfg      `json:"auth"` // 三层认证图（0.2.3）
+	Log       LogConf      `json:"log"`  // 服务端日志（0.2.7：等级/目录/轮转上限）
 	Anonymous AnonymousCfg `json:"anonymous"`
 	RateLimit RateLimitCfg `json:"rateLimit"`
 	Versions  VersionsCfg  `json:"versions"`
@@ -198,9 +214,10 @@ func DefaultConfig() *Config {
 		LANOnly:            true,
 		DataDir:            "./data",
 		TrashRetentionDays: 30,
-		MaxUploadBytes:     2 << 30,
-		Session:            SessionCfg{AccessTTL: "1h", IdleDays: 21},
+		MaxUploadBytes:     0, // 0.2.8：默认不限（超限 413 仅对显式配置生效）
+		Session:            SessionCfg{AccessTTL: "1h", IdleDays: 21, IdleMinutes: 60},
 		Auth:               AuthCfg{MemMaxEntries: 200000, MemTTL: "5m", RedisMaxEntries: 5000000, SweepInterval: "10m", TouchWriteEvery: "10m"},
+		Log:                LogConf{Level: "warn", MaxMB: 10, MaxFiles: 3}, // Dir 留空=<dataDir>/logs（finalize/LogDir 派生）
 		Anonymous:          AnonymousCfg{Enabled: true},
 		Versions:           VersionsCfg{Enabled: true, MaxVersions: 10},
 		TLS:                TLSCfg{AutoSelfSign: true},
@@ -350,6 +367,9 @@ func finalize(c *Config) (*Config, error) {
 	if c.Session.IdleDays <= 0 {
 		c.Session.IdleDays = 21
 	}
+	if c.Session.IdleMinutes <= 0 {
+		c.Session.IdleMinutes = 60 // 0.2.4：用户会话滑动闲置窗口默认 1h（需求22 微调）
+	}
 	// 三层认证图默认（0.2.3）
 	if c.Auth.MemMaxEntries <= 0 {
 		c.Auth.MemMaxEntries = 200000
@@ -365,6 +385,23 @@ func finalize(c *Config) (*Config, error) {
 	}
 	if c.Auth.TouchWriteEvery == "" {
 		c.Auth.TouchWriteEvery = "10m"
+	}
+	// 日志（0.2.7）：等级非法值收敛为 warn（默认等级，不因配置笔误拒绝启动）；
+	// 轮转上限收敛——maxMB<=0→10、maxFiles<1→3、>10→10（防失控占用磁盘）。
+	switch strings.ToLower(strings.TrimSpace(c.Log.Level)) {
+	case "debug", "info", "warn", "error":
+		c.Log.Level = strings.ToLower(strings.TrimSpace(c.Log.Level))
+	default:
+		c.Log.Level = "warn"
+	}
+	if c.Log.MaxMB <= 0 {
+		c.Log.MaxMB = 10
+	}
+	if c.Log.MaxFiles < 1 {
+		c.Log.MaxFiles = 3
+	}
+	if c.Log.MaxFiles > 10 {
+		c.Log.MaxFiles = 10
 	}
 	if c.Versions.MaxVersions <= 0 {
 		c.Versions.MaxVersions = 10
@@ -437,6 +474,14 @@ func (c *Config) HomeDir(username string) string { return filepath.Join(c.UsersD
 // TLSDir 自签证书目录（归入 dataDir，替代原硬编码 ./data/tls）。
 func (c *Config) TLSDir() string { return filepath.Join(c.DataDir, "tls") }
 
+// LogDir 服务端日志目录（0.2.7）：log.dir 显式配置优先，否则 <dataDir>/logs。
+func (c *Config) LogDir() string {
+	if c.Log.Dir != "" {
+		return c.Log.Dir
+	}
+	return filepath.Join(c.DataDir, "logs")
+}
+
 // AdminAccountFile 超级管理员账户文件（0.1.0 需求32）：<dataDir>/admin-account.json。
 // 与 jwt.secret 同理属运行数据：多实例共享部署需放共享卷或逐节点保持一致。
 func (c *Config) AdminAccountFile() string { return filepath.Join(c.DataDir, "admin-account.json") }
@@ -472,8 +517,13 @@ func (c *Config) AccessTTLDuration() time.Duration {
 	return d
 }
 
-// IdleDuration 返回用户会话滑动闲置上限（默认 3 周，每次认证请求续期）。
+// IdleDuration 返回用户会话滑动闲置上限（0.2.4 起默认 **1 小时**，每次认证
+// 请求无感续期、凭证字符串不变）。IdleMinutes>0 以分钟窗口为准；仅当
+// IdleMinutes 未设置（异常旧配置绕过迁移直读）时回退旧 idleDays 天窗口。
 func (c *Config) IdleDuration() time.Duration {
+	if c.Session.IdleMinutes > 0 {
+		return time.Duration(c.Session.IdleMinutes) * time.Minute
+	}
 	return time.Duration(c.Session.IdleDays) * 24 * time.Hour
 }
 
@@ -548,13 +598,14 @@ func WriteExample(path string) error {
 		"trashDir":           "./data/trash",
 		"uploadStagingDir":   "./data/staging",
 		"trashRetentionDays": 30,
-		"maxUploadBytes":     2147483648,
+		"maxUploadBytes":     0, // 单次上传大小硬上限（字节，0=不限）；0.2.8 起默认不限，需要限额填正数
 		"adminAccess":        map[string]any{"mode": "local", "ips": []string{}}, // 管理界面 IP 准入（需求38）：local 仅本机 / lan 局域网 / any 任何来源 / custom 指定 ips（IP 或 CIDR 列表）
 		"adminPassword":      "",                                                 // 超管口令重置触发器（0.1.0 需求32）：填入明文→启动时写入超管账户文件并提示清空；平时留空
 		"ai":                 map[string]any{"provider": "none", "baseUrl": "", "apiKey": "", "model": "", "maxFileMB": 20},
 		"tls":                map[string]any{"enabled": false, "certFile": "", "keyFile": "", "autoSelfSign": true},
 		"session":            map[string]any{"accessTTL": "1h", "idleDays": 21},
 		"auth":               map[string]any{"memMaxEntries": 200000, "memTTL": "5m", "redisMaxEntries": 5000000, "sweepInterval": "10m", "touchWriteEvery": "10m"}, // 三层认证图（0.2.3）：进程内 LRU 上限/新鲜期、redis 上限、清扫周期、续期写回间隔
+		"log":                map[string]any{"level": "warn", "dir": "", "maxMB": 10, "maxFiles": 3},                                                                // 服务端日志（0.2.7）：等级 debug|info|warn|error（默认 warn）；dir 空=<dataDir>/logs；含当前文件在内最多 maxFiles 个、单文件 ≤maxMB MB 按大小轮转；敏感值（口令/令牌/请求体）永不入日志
 		"anonymous":          map[string]any{"enabled": true},
 		"rateLimit":          map[string]any{"uploadKBps": 0, "downloadKBps": 0, "qps": 0},
 		"corsAllowOrigins":   []string{},
