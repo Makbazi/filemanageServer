@@ -11,7 +11,26 @@
 /* ---------- 一、常量与全局状态 ---------- */
 const TOKEN_KEY = "fm_admin_token"; // token 的 localStorage 键名（需求约定）
 const USER_KEY = "fm_admin_user";   // 当前登录管理员信息缓存键
-const API_BASE = "/api/v1";         // API 统一前缀
+const API_BASE = "/api/v1";         // 管理 API 统一前缀（/api/v1/admin/*）
+// 0.2.11 端口彻底拆分：本控制台只调用管理端口专属端点（登录/ACL 写/分享写
+// 均为 /admin/ 下独立端点），不再复用用户端口业务 API。
+const ADMIN_API = "/api/v1/admin";  // 管理专属前缀
+
+// 分享链接的用户端口完整 URL（/s/:token 只在用户端口注册）：
+// scheme 取 /admin/info 的 tlsEnabled，主机取本机 location.hostname，端口从
+// listen（如 "0.0.0.0:8484"）解析；listen 为具体主机地址时优先采用。
+function userPortBase() {
+  const info = serverInfo || {};
+  const scheme = info.tlsEnabled ? "https" : "http";
+  const listen = String(info.listen || "");
+  let hostPart = listen, port = "";
+  const i = listen.lastIndexOf(":");
+  if (i >= 0) { hostPart = listen.slice(0, i); port = listen.slice(i + 1); }
+  if (!hostPart || hostPart === "0.0.0.0" || hostPart === "::" || hostPart === "[::]" || hostPart === "*") {
+    hostPart = location.hostname;
+  }
+  return port ? `${scheme}://${hostPart}:${port}` : `${scheme}://${hostPart}`;
+}
 
 let token = "";            // Bearer token
 let currentUser = null;    // {id, username, role}
@@ -185,8 +204,8 @@ async function handleLogin(ev) {
   btn.disabled = true;
   btn.textContent = "登录中…";
   try {
-    const data = await api(API_BASE + "/auth/login", { method: "POST", body: { username, password } });
-    // 非 admin 角色即使登录成功也拒绝进入管理台
+    const data = await api(ADMIN_API + "/login", { method: "POST", body: { username, password } });
+    // 非 admin 角色即使登录成功也拒绝进入管理台（普通账户走客户端，服务端同样 403）
     if (!data || !data.user || data.user.role !== "admin") { toast("需要管理员权限", false); return; }
     token = data.token;
     currentUser = data.user;
@@ -194,7 +213,7 @@ async function handleLogin(ev) {
     localStorage.setItem(USER_KEY, JSON.stringify(currentUser));
     $("#login-password").value = "";
     enterAdmin();
-    toast(`欢迎回来，${currentUser.username}`);
+    toast(`欢迎回来，${currentUser.nickname || currentUser.username}`);
   } catch (e) { /* 错误信息已由 api() 弹提示条 */ }
   finally { btn.disabled = false; btn.textContent = "登 录"; }
 }
@@ -202,7 +221,7 @@ async function handleLogin(ev) {
 // 进入管理台：填充顶栏并默认打开"概览"
 function enterAdmin() {
   $("#current-user").textContent = currentUser
-    ? `${currentUser.username}（${currentUser.super ? "超级管理员" : "管理员"}）` : "";
+    ? `${currentUser.nickname || currentUser.username}（${currentUser.super ? "超级管理员" : "管理员"}）` : "";
   showAdmin();
   refreshTabAccess(); // 0.1.0 需求33：降级模式页签收敛为 概览/超级管理员/数据库
   switchTab("overview");
@@ -306,7 +325,7 @@ function rootsHTML(rs) {
 
 function renderUsers() {
   const tbody = $("#users-tbody");
-  if (!usersCache.length) { tbody.innerHTML = emptyRow(6); tbody.onclick = null; return; }
+  if (!usersCache.length) { tbody.innerHTML = emptyRow(7); tbody.onclick = null; return; }
   tbody.innerHTML = usersCache.map((u) => {
     const isSelf = currentUser && String(u.id) === String(currentUser.id);
     // 需求33：管理员账户（非超管）对普通管理员只读——编辑/删除禁用（服务端同样 403）
@@ -315,6 +334,7 @@ function renderUsers() {
     return `<tr>
       <td class="mono">${esc(u.id)}</td>
       <td>${esc(u.username)}${isSelf ? ' <span class="badge blue">我</span>' : ""}</td>
+      <td>${u.nickname ? esc(u.nickname) : '<span class="muted">（未设置）</span>'}</td>
       <td>${u.role === "admin" ? '<span class="badge purple">管理员</span>' : '<span class="badge gray">普通用户</span>'}</td>
       <td>${rootsHTML(u.userRoots)}</td>
       <td class="muted">${fmtTime(u.createdAt)}</td>
@@ -331,7 +351,7 @@ function renderUsers() {
     const u = usersCache.find((x) => String(x.id) === btn.dataset.id);
     if (!u) return;
     if (btn.dataset.act === "edit") { openUserModal(u); return; }
-    if (!confirm(`确定删除用户「${u.username}」吗？此操作不可恢复。`)) return;
+    if (!confirm(`确定删除账户「${u.username}」吗？此操作不可恢复。\n其家目录与回收站目录将以孤儿目录保留在 Users/ 下（不自动删除，同名重建不会复用旧目录），如需清理请手动删除磁盘目录。`)) return;
     try {
       await api(`${API_BASE}/admin/users/${encodeURIComponent(u.id)}`, { method: "DELETE" });
       toast("用户已删除");
@@ -355,9 +375,12 @@ function openUserModal(user) {
   let pickErr = "";
 
   openModal(editing ? "编辑用户" : "新建用户", `
-    <div class="form-item"><label>用户名</label>
+    <div class="form-item"><label>账户</label>
       <input id="um-username" type="text" value="${esc(user ? user.username : "")}"
-        placeholder="登录用户名" ${editing ? "disabled" : ""} autocomplete="off"></div>
+        placeholder="登录账户（唯一、不可修改）" ${editing ? "disabled" : ""} autocomplete="off"></div>
+    <div class="form-item"><label>昵称 <span class="muted">（可修改、可重复，登录后显示；留空则显示账户名）</span></label>
+      <input id="um-nickname" type="text" value="${esc(user && user.nickname ? user.nickname : "")}"
+        placeholder="展示用昵称" autocomplete="off" maxlength="64"></div>
     <div class="form-item"><label>${editing ? "新密码" : "密码"}</label>
       <input id="um-password" type="password" autocomplete="new-password"
         placeholder="${editing ? "留空表示不修改密码" : "登录密码"}"></div>
@@ -443,19 +466,20 @@ function openUserModal(user) {
 
   async function save() {
     const password = $("#um-password").value;
+    const nickname = $("#um-nickname").value.trim();
     const role = $("#um-role").value;
     const jailBody = { roots: jailRows.filter((r) => r.rootId).map((r) => ({ rootId: r.rootId, subPath: r.subPath, alias: r.alias })) };
     try {
       let id;
       if (editing) {
-        const body = { role };                       // password 留空 = 不修改
+        const body = { role, nickname };             // password 留空 = 不修改；昵称总提交（空串=清除）
         if (password) body.password = password;
         await api(`${API_BASE}/admin/users/${encodeURIComponent(user.id)}`, { method: "PUT", body });
         id = user.id;
       } else {
         const username = $("#um-username").value.trim();
-        if (!username || !password) { toast("请输入用户名和密码", false); return; }
-        const created = await api(API_BASE + "/admin/users", { method: "POST", body: { username, password, role } });
+        if (!username || !password) { toast("请输入账户和密码", false); return; }
+        const created = await api(API_BASE + "/admin/users", { method: "POST", body: { username, nickname, password, role } });
         id = created && created.id;
       }
       if (id) await api(`${API_BASE}/admin/users/${encodeURIComponent(id)}/roots`, { method: "PUT", body: jailBody });
@@ -720,10 +744,11 @@ function bindAclEditorEvents() {
   });
 }
 
-// 保存：PUT /api/v1/acl，整体替换该路径的条目
+// 保存：PUT /api/v1/admin/acl（0.2.11 管理专属端点），整体替换该路径的条目
+// （物理键直存——管理台读 /admin/acls 本就以物理键工作）
 async function saveAcl() {
   try {
-    await api(API_BASE + "/acl", { method: "PUT", body: {
+    await api(ADMIN_API + "/acl", { method: "PUT", body: {
       rootId: aclEditor.rootId, path: aclEditor.path,
       entries: aclEditor.entries.map((e) => ({ subjectType: e.subjectType, subjectId: e.subjectId, perms: e.perms })),
     } });
@@ -755,7 +780,7 @@ function renderLinks(links) {
   const tbody = $("#links-tbody");
   if (!links.length) { tbody.innerHTML = emptyRow(6); tbody.onclick = null; return; }
   tbody.innerHTML = links.map((l) => {
-    const fullUrl = `${location.origin}/s/${l.token}`; // 完整 URL 用 location.origin 拼接
+    const fullUrl = `${userPortBase()}/s/${l.token}`; // 0.2.11：/s/ 只在用户端口——按 listen 构造
     return `<tr>
       <td><span class="link-cell"><code class="mono">/s/${esc(l.token)}</code>
         <button type="button" class="btn sm ghost" data-act="copy" data-url="${esc(fullUrl)}">复制</button></span></td>
@@ -778,7 +803,7 @@ function renderLinks(links) {
     if (btn.dataset.act === "edit") { openLinkEditor(link); return; }
     if (!confirm(`确定删除分享链接 /s/${link.token} 吗？删除后立即失效。`)) return;
     try {
-      await api(`${API_BASE}/share/links/${encodeURIComponent(link.token)}`, { method: "DELETE" });
+      await api(`${ADMIN_API}/links/${encodeURIComponent(link.token)}`, { method: "DELETE" });
       toast("链接已删除");
       loadLinks();
     } catch (e) { /* 已弹提示 */ }
@@ -821,7 +846,7 @@ function openLinkEditor(link) {
     }
     body.disabled = $("#le-disabled").checked;
     try {
-      await api(`${API_BASE}/share/links/${encodeURIComponent(link.token)}`, { method: "PUT", body });
+      await api(`${ADMIN_API}/links/${encodeURIComponent(link.token)}`, { method: "PUT", body });
       toast("链接已更新");
       closeModal();
       loadLinks();
@@ -876,7 +901,7 @@ function openNewLink() {
       }
     }
     try {
-      const res = await api(API_BASE + "/share/links", { method: "POST", body });
+      const res = await api(ADMIN_API + "/links", { method: "POST", body });
       closeModal();
       showLinkCreated(res || {});
       loadLinks();
@@ -886,7 +911,7 @@ function openNewLink() {
 
 // 创建成功：醒目模态框展示完整 URL + 明文密码（仅此一次）
 function showLinkCreated(res) {
-  const fullUrl = res.url && /^https?:\/\//i.test(res.url) ? res.url : `${location.origin}/s/${res.token || ""}`;
+  const fullUrl = res.url && /^https?:\/\//i.test(res.url) ? res.url : `${userPortBase()}/s/${res.token || ""}`;
   openModal("✅ 链接创建成功", `
     <div class="created-box">
       ${res.password ? '<p class="warn-text">⚠️ 密码明文仅此一次展示，关闭后无法再次查看，请立即保存！</p>' : ""}

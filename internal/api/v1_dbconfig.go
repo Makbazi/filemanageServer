@@ -289,10 +289,14 @@ func (s *Server) handleAdminDBConnect(c *gin.Context) {
 			logx.WarnT(traceOf(c), "db connect: cache flush: %v", ferr)
 		}
 	}
-	// 家目录存量补齐（幂等；空新库无用户也直接落标记，见 EnsureUserHomes）
+	// 家目录存量补齐（幂等；空新库无用户也直接落标记，见 EnsureUserHomes）；
+	// 0.2.11：随后跑 v8 布局迁移（改名+回收站并级+物理键行改写，同序幂等）。
 	if s.dbReady() {
 		if herr := fileops.EnsureUserHomes(s.DBProxy, s.Cfg.UsersDir()); herr != nil {
 			logx.WarnT(traceOf(c), "db connect: ensure homes: %v", herr)
+		}
+		if herr := fileops.MigrateUserHomeLayout(s.DBProxy, s.Cfg.UsersDir()); herr != nil {
+			logx.WarnT(traceOf(c), "db connect: home layout v8: %v", herr)
 		}
 	}
 	if old != nil {

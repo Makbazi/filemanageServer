@@ -16,9 +16,13 @@ const (
 const SuperAdminID int64 = 0
 
 // User 服务端账户，区分用户并限定可见根目录。
+// 0.2.11 三分离：Username=账户（登录名，唯一不可改，参与家目录命名）；
+// Nickname=昵称（可改可重复，仅展示用，不进任何路径/键）；ID=用户 id
+// （仅服务端内部使用，用户端口响应面不得出现）。
 type User struct {
 	ID           int64     `json:"id"`
 	Username     string    `json:"username"`
+	Nickname     string    `json:"nickname"`
 	PasswordHash string    `json:"-"`
 	Role         string    `json:"role"`
 	AllowedRoots []string  `json:"allowedRoots"` // 空表示允许全部根目录

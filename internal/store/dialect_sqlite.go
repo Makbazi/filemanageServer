@@ -14,6 +14,7 @@ func sqliteDDL() []string {
 		`CREATE TABLE IF NOT EXISTS users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			username TEXT NOT NULL UNIQUE,
+			nickname TEXT NOT NULL DEFAULT '',
 			password_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'user',
 			allowed_roots TEXT NOT NULL DEFAULT '[]',
@@ -111,9 +112,10 @@ func sqliteDDL() []string {
 	}
 }
 
-// sqliteEnsureExtra 存量库加列守卫（0.2.4 auth_sessions.client_id；只增不改，
-// 属幂等 DDL 清单的组成部分——sqlite 无 ADD COLUMN IF NOT EXISTS，先查
-// pragma_table_info 再 ALTER；既有列/表绝不触碰，磁盘字节兼容不受影响）。
+// sqliteEnsureExtra 存量库加列守卫（0.2.4 auth_sessions.client_id、
+// 0.2.11 users.nickname；只增不改，属幂等 DDL 清单的组成部分——sqlite 无
+// ADD COLUMN IF NOT EXISTS，先查 pragma_table_info 再 ALTER；既有列/表绝不
+// 触碰，磁盘字节兼容不受影响）。
 func sqliteEnsureExtra(db *gorm.DB) error {
 	var cnt int64
 	err := db.Raw("SELECT COUNT(*) FROM pragma_table_info('auth_sessions') WHERE name = 'client_id'").
@@ -124,6 +126,17 @@ func sqliteEnsureExtra(db *gorm.DB) error {
 	if cnt == 0 {
 		if err := db.Exec("ALTER TABLE auth_sessions ADD COLUMN client_id TEXT NOT NULL DEFAULT ''").Error; err != nil {
 			return fmt.Errorf("migrate: add client_id: %w", err)
+		}
+	}
+	cnt = 0
+	err = db.Raw("SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'nickname'").
+		Scan(&cnt).Error
+	if err != nil {
+		return fmt.Errorf("migrate: probe users.nickname: %w", err)
+	}
+	if cnt == 0 {
+		if err := db.Exec("ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT ''").Error; err != nil {
+			return fmt.Errorf("migrate: add users.nickname: %w", err)
 		}
 	}
 	return nil

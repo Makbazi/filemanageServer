@@ -60,12 +60,14 @@ func isNetDisconnect(err error) bool {
 // 日志内容只有方法/路径/错误串——绝不落请求头与请求体（敏感纪律）。
 func writeErr(c *gin.Context, code int, err error) {
 	msg := err.Error()
+	// 0.2.11：路径经 sanitizeLogTarget 脱敏（/s/<token> 与 st/口令参数值不落日志）
+	target := sanitizeLogTarget(c.Request.URL)
 	switch {
 	case code == statusClientClosedRequest:
-		log.Printf("client disconnected: %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
+		log.Printf("client disconnected: %s %s: %v", c.Request.Method, target, err)
 		msg = "client closed request"
 	case code >= http.StatusInternalServerError && code != http.StatusServiceUnavailable:
-		logx.ErrorT(traceOf(c), "internal error: %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
+		logx.ErrorT(traceOf(c), "internal error: %s %s: %v", c.Request.Method, target, err)
 		msg = "internal server error"
 	}
 	writeJSON(c, code, map[string]string{"error": msg})

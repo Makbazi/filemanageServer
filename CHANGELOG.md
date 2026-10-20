@@ -10,7 +10,8 @@
 
 | filemanageServer | 元数据存储 | 兼容 filemanageClient |
 |---|---|---|
-| 0.2.x（当前 **0.2.9**；0.2.9=版本号对齐批——代码/协议/配置 schema/Store/go.mod 零变更，配套 Client 0.3.9 修复批，推荐位见下行） | 自含（同 0.2.4；0.2.8 上传限额默认值放宽：`maxUploadBytes` 默认 2GiB→**0=不限**（migrate11to12 恰好等于历代默认字面量 2147483648 的配置升为 0，用户显式自定义限额原样保留；schemaVersion 11→12；无新表/新列/新端点，go.mod 零变更）；0.2.7 服务端日志（log 段，schema 10→11）与 0.2.4 认证收敛、0.2.3 auth_sessions/去 JWT 沿用） | **`/api/v1` 数据协议零变更、响应形状零变更**——0.2.8 仅默认限额值变化（`POST /upload/session` 的 413 判定从"默认必现"变为"仅显式配置限额时"），兼容 Client 0.1.x–**0.3.8** 全系列一切历代版本；推荐基线为 **Client 0.3.8**（本批配套定版：大文件上传恢复+客户端 413 中文指引；0.3.6 起认证收敛语义全保留、0.3.7 起转码/恢复/渲染/批量/设置能力对协议零依赖）。旧客户端 0.1.x–0.3.5 与移动端**可用但降级**（会话未绑定不查头；refresh 401/404 退化重登；窗口同降 1h）。管理台内嵌前端兼容（保留 `{token,user}`）；`GET /thumb` JPEG/RAW 出图面 50MP/9000px 沿用|
+| **0.2.11（当前，破坏批；配套 Client 0.3.12）**——端口彻底拆分（管理端口不再注册用户 API，专属 `/admin/login`、`PUT /admin/acl`、`/admin/links` CRUD）+ 账户/昵称/用户 id 三分离（users 加列 nickname；家目录 `user_<账户>_<用户id>`、回收站并级 `<目录名>_trash`；一次性布局迁移 `userhomes.v8` 含七表物理键改写）+ 用户端口数字用户 id 全隐藏（/auth/me 加 nickname、新增 PUT /auth/profile、/acl/subjects 与 ACL 条目账户化、/versions /ai /share 响应视图化）+ 超管建分享 410 潜在 bug 修复 + 暂停期管理台可登录 | 自含（0.2.11 users 加列 `nickname` 只增不改——四方言 CREATE 含列 + extra 幂等加列守卫（sqlite PRAGMA/mysql information_schema/pg IF NOT EXISTS）、file 驱动 JSON 加性；Store 接口新增 `UpdateUserNickname`/`RewritePhysicalPath` 两方法（sqlStore/fileStore/proxy/cache 全实现）；config schemaVersion **保持 12**（无配置结构变更）；布局迁移标记 `userhomes.v8`（启动与热切换双站点，磁盘先改名后写库、可重入）） | **推荐 Client 0.3.12**。用户端口破坏点：`/acl/subjects` 不再含数字 id/role/members、ACL 条目响应改 `subject:"user:<账户>"`（PUT 入参兼容旧数字 subjectId）、`/versions` 不再转储 store 行（物理 rootId/path/storeId/createdBy 移除）、share `linkView` 去 `createdBy`、`/ai/*` 响应视图化（去 userId/物理键）。**登录请求/响应形状不变**（`{username,password,clientId?}`→`{token}`，username 语义=账户），家目录虚拟根 id `_users:<账户>` 形式升级前后字面恒效（旧基座名即账户名；新布局含 id 的目录名经逐段令牌映射不外露）。旧桌面 0.1.x–0.3.11 与移动端**可用但按需降级**（ACL 编辑/昵称功能不可用面按兼容记录适配；登录/浏览/上传下载/回收站/分享访问全兼容）。管理台内嵌前端改调用管理端口专属端点（`{token,user}` 保留并含 nickname）；`/s/:token` 仅用户端口——管理台分享 URL 按 `/admin/info` 的 listen+tlsEnabled 构造 |
+| 0.2.x（0.2.9=版本号对齐批——代码/协议/配置 schema/Store/go.mod 零变更，配套 Client 0.3.9 修复批；0.2.8 上传限额默认批；0.2.7 日志批；0.2.4 认证收敛；0.2.3 去 JWT） | 自含（同 0.2.4；0.2.8 上传限额默认值放宽：`maxUploadBytes` 默认 2GiB→**0=不限**（migrate11to12 恰好等于历代默认字面量 2147483648 的配置升为 0，用户显式自定义限额原样保留；schemaVersion 11→12；无新表/新列/新端点，go.mod 零变更）；0.2.7 服务端日志（log 段，schema 10→11）与 0.2.4 认证收敛、0.2.3 auth_sessions/去 JWT 沿用） | 承前各批对 Client 0.1.x–0.3.11 **`/api/v1` 数据协议零变更、响应形状零变更**——0.2.8 仅默认限额值变化（`POST /upload/session` 的 413 判定从"默认必现"变为"仅显式配置限额时"），兼容 Client 0.1.x–**0.3.8** 全系列一切历代版本；0.3.6 起认证收敛语义全保留、0.3.7 起转码/恢复/渲染/批量/设置能力对协议零依赖。旧客户端 0.1.x–0.3.5 与移动端**可用但降级**（会话未绑定不查头；refresh 401/404 退化重登；窗口同降 1h）。管理台内嵌前端兼容（保留 `{token,user}`）；`GET /thumb` JPEG/RAW 出图面 50MP/9000px 沿用|
 | 0.2.3 | 自含（同 0.1.x；0.2.3 认证重构：新表 `auth_sessions`（幂等增量，四方言+file 驱动）、配置 schemaVersion 8→9（auth 段）、`golang-jwt` 依赖移除；旧 `sessions` 表冻结不再读写但保留磁盘兼容） | Client 0.3.4（推荐位由 0.3.6 取代；认证协议字段形状零变更，0.1.x–0.3.4 登录/刷新/分享/管理台全链路可用）；**一次性代价**：升级到该版本时所有既有 JWT/refresh/分享 st 令牌失效，重登一次 |
 | 0.2.2 | 自含（同 0.1.x；仅 `GET /thumb` 白名单扩 BMP（thumbdec.go 纯标准库自实现），无新端点/新表/新列、schemaVersion 保持 8） | Client 0.3.3（服务端网格 BMP 出图=本地缩放机制）；Client 0.3.2/0.2.x 无感可用且 BMP 由 415 变 200 为纯增益面（旧客户端 size_hint 回退语义不变）；Client 0.1.x 及以下同 |
 | 0.2.1 | 自含（同 0.1.x；纯 API 面加性 `GET /thumb`+`POST /check` 与静默修复，无新表/新列、schemaVersion 保持 8） | **Client 0.3.2 完整功能（浏览零下载+目录重传预检依赖本版本端点）**；Client 0.2.0/0.3.x 早期版本全功能无感（不调用新端点即无感）；Client 0.1.x 及以下同 |
@@ -43,6 +44,43 @@
   版本号落到 `"unknown"`。设 `FM_VERSION=x.y.z ./build.sh -a all` 可跳过 git 推导固定版本
   （此时也不追加 `-dirty`）；亦可在流水线先 `git fetch --tags --force`（浅克隆加
   `--unshallow`）并 `git config --global --add safe.directory "$WORKSPACE"` 让 tag 真正可用。
+
+## [0.2.11] - 2026-10-20（破坏批：端口 API 彻底拆分 + 账户/昵称/用户 id 三分离 + 家目录/回收站新布局；用户 2026-10-20 清单 1–6 条；跳号 0.2.9→0.2.11 系维护者定版指令；配套 Client 0.3.12；tag 由维护者打）
+
+### 破坏性变更①：管理/用户 API 完全独立、不复用（需求1/2/3）
+- `AdminHandler` **删除 `registerV1` 重复注册**（0.2.10 前管理端口完整暴露全部用户 API 供内嵌管理台反向调用——本批起两端口注册集**零交集**：管理端口对 `/api/v1/*` 业务面与 `/s/:token` 一律 404；用户端口管理路由 404 自 0.1.0 起即为然）。
+- 管理台专属端点（仅管理端口）：`POST /api/v1/admin/login`（超管+DB 管理员两分支从 `handleLogin` 抽出为 `handleAdminLogin`；注册在**裸组**——无 requireDB/无 authCtx/无 maintenanceGate，超管无库可登、暂停期操作员不被锁死，修正 0.2.4 前"暂停期管理台登录 503"与 middleware 文档不符问题）；`PUT /api/v1/admin/acl`（物理键直存、无角色分叉）；`POST/PUT/DELETE /api/v1/admin/links`（管理员代管分享，无所有权校验，响应 `linkViewFull` 含物理键与 createdBy——管理面可见）。
+- `handleLogin`/`authCtx`/`handleACLPut`/`handleShareUpdate`/`shareByTokenOwner`/`handleACLDelete` 中的 `adminModeKey` 角色分叉全部移除；`computeBases` 管理端口整根分支删除（拆分后管理引擎不再有 scope() 调用者；`adminScope` 标记保留供 authCtx 分流与 `/api` 的 adminUI 字段）。用户端口响应 `{"token"}` 形状不变。
+- 分享访问链不变：管理台建的链接经**用户端口** `/s/:token` 匿名访问；管理台分享完整 URL 由 `/admin/info` 的 `listen`+`tlsEnabled` 构造（不再 `location.origin`）。
+
+### 破坏性变更②：账户/昵称/用户 id 三分离 + 同名复用目录 bug 修复（需求4）
+- 模型：`username` 语义=**账户**（唯一、不可改、可作目录名片段，登录凭证名）；新增 `nickname`=**昵称**（可改、可重复、仅展示，空=显示回退账户；`users` 加列 TEXT DEFAULT ''，四方言 extra 幂等加列守卫、file 驱动 JSON 加性）；`User.ID`=用户 id（自增永不复用，**只服务端内部使用**）。
+- **串目录 bug 根修**：家目录名 `user_<账户>_<用户id>`——删除账户后同名重建必落新目录（旧 `EnsureHomeFor` 的 `MkdirAll(Users/<用户名>)` 对删号遗留目录静默复用是根因；目录名含永不复用的 id 后从结构上绝迹）。删号磁盘行为保持"只删元数据、目录留孤儿"（维护者决策，运维自清）。
+- 用户端口 API 边界彻底去数字用户 id：`GET /auth/me` → `{username, nickname}`（昵称现读库，热路径 authCtx 零查库红线不破）；新增 `PUT /auth/profile {nickname}`（自助改昵称，不吊销会话）；`/acl/subjects` → `{account, nickname, subject}`（去 id/role/members）；ACL 条目 GET/PUT 响应改 `subject:"user:<账户>"`+`subjectName`（存储仍数字键控，边界翻译；PUT 兼容旧数字 `subjectId` 入参）；`/versions` 不再转储 store 行（物理 rootId/path/storeId/createdBy 泄漏面一并收敛）；share `linkView` 去 `createdBy`；`/ai/*` 响应视图化（去 userId/物理键）。管理台（服务端管理面，非"客户端"）按需求4 决策保留数字 id REST 寻址。
+- 家目录虚拟根遮蔽：客户端可见令牌 **`_users:<账户>`**（含分享进家目录的子基座逐段映射 `alice/docs`）；入方向 `scope()` 经 `translateHomeJail` 还原真实基座、`scopePhys` 物理键回流天然直通——升级前后 `_users:<账户>` 恒字面有效，存量客户端缓存根 id 不失效；伪造他人目录仍 403（基座命中检查原样）。
+- 附带修复：`validLink` 对 `CreatedBy=0`（超管哨兵）跳过创建者校验——超管所建分享此前必 410。
+
+### 变更③：回收站与家目录并级（需求5）+ 一次性布局迁移
+- 新布局：`<dataDir>/Users/user_<账户>_<id>`（家目录）+ `Users/user_<账户>_<id>_trash`（回收站实体，**并级**不再内嵌 `.fmtrash`）。
+- 迁移 `fileops.MigrateUserHomeLayout`（server_meta 标记 `userhomes.v8`，启动 + DB 热切换双站点，模式同 v7）：目录 rename → 内嵌 `.fmtrash` 条目逐搬 `*_trash` → `Store.RewritePhysicalPath(_users, 旧名, 新名)`（**七表**存量物理键行改写：file_metas/ai_descriptions/trash_items/folder_acls/share_links/file_versions/upload_sessions；新接口方法 sqlStore/fileStore/proxy/cache 全实现，单事务/单写锁、幂等）→ `SetUserRoots` 换 SubPath。**磁盘先改名后写库**（崩溃锚点），三态可重入；回收站实体解析保留三候选（并级→迁移中间态嵌套→旧名嵌套→中央），迁移中断窗口内条目仍可还原/清除。
+- `Cleaner.removeTrashBlob` 候选化（不再按 `u.Username` 直拼）；`.fmtrash` 保留名拦截与列表隐藏**保留**（未迁孤儿目录纵深防御）。config schemaVersion 保持 12。
+
+### 变更④：日志六级化与必要日志补充（用户 2026-10-20 追加指令；版本保持 0.2.11）
+- **六级**：`trace < debug < info < warn < error < fatal`（logx 引入标准库 `log/slog` 日志库之上扩展：trace=-8、fatal=16，文本 Handler ReplaceAttr 渲染 `TRACE`/`FATAL` 等级名）；`log.level` 配置取值域加宽、默认 **warn** 不变、非法收敛 warn——仅取值域变化无结构变更，schemaVersion 保持 12。
+- **logx.Fatal**：以 fatal 级落行（任何配置等级下必可见）后 `os.Exit(1)`；main/balancer 启动 fail-fast 站点全部改走 logx.Fatal——**根治旧 `log.Fatalf` 经 stdlib 桥接按 INFO 走、默认 warn 等级下进程死得无声无息的吞没问题**；`log.Printf("warn: …")` 各站点转 logx.Warn（家目录迁移未完成/跳过、认证预热失败、jail 迁移告警、超管同名遮蔽账户告警、balancer worker 摘除）。
+- **URL 凭证脱敏**（敏感纪律扩展）：分享访问凭证存在于 URL（`/s/<token>` 路径段、`?st=` 查询值、share 口令参数）——新增 `api.sanitizeLogTarget` 统一遮蔽（`/s/**`、`st/token/password/pass/pwd=**`，键名保留便于排障；query 解析失败整体 `<unparsed>`），loggerGin 请求行与 writeErr internal error 行同用。
+- **补充必要日志**（只记账户名/结果/IP/计数，绝不记口令、Bearer 凭证、分享 token 值）：
+  authCtx 拒绝面——X-Client-Id 核对不符（WarnT）、超管/管理员凭证出现在用户端口（WarnT，需求36）、超管凭据纪元推进吊销（WarnT）、share 凭证被当身份/坏凭证（DebugT）、身份解析成功细节（TraceT，trace 级形态示范）；
+  登录面——用户端口/管理台登录成功（InfoT）、防爆破锁定（WarnT）、跨端口登录拒绝（WarnT）、口令不符（DebugT）；
+  账户与权限面——自助改密成功（InfoT，含会话全吊销）、自助改昵称（InfoT）、管理台创建/更新账户与目录分配（InfoT）、**删除账户（WarnT，注明孤儿目录留盘）**、用户端口与管理端 ACL 更新（InfoT）、分享链接创建/删除（InfoT，不记 token）；
+  fileops 家目录迁移 skip 类（Warn）与改道明细（Info）。
+- trace 级为"逐请求细节"层（生产常闭），排障时 `log.level=trace` 打开；六级全链路冒烟：默认 warn 下 INFO/DEBUG/TRACE 静默、WARN/ERROR/FATAL 可见；fail-fast FATAL 行落盘且退出码 1；`/s/**?st=**&password=**` 脱敏；敏感值全量 grep 日志 0 命中。
+
+### 验证（需求29）
+- `go build ./... && go vet ./...` 通过；冒烟（文件存储 + sqlite 双实例）：建号目录/回收站并级 ✓ 删号同名重建新目录互不可见 ✓ /auth/me+profile ✓ roots 令牌 `_users:alice` 无数字 id ✓ ACL 账户化往返+旧数字入参兼容+伪造拒绝 ✓ 回收站删除/还原/彻底删除 ✓ 双端口注册集零交集（404 面）✓ 管理台登录/ACL/分享 CRUD、超管链接 `/s/` 访问不 410 ✓ 暂停期用户口 503/管理台登录可用 ✓ 存量迁移（旧布局回退后启动自动迁移，还原/分享链完整）✓。
+
+### 兼容
+- **Server 0.2.11 ↔ Client 0.3.12（推荐）**。旧客户端/移动端可用但按需降级（登录/浏览/上传下载/回收站/分享访问全兼容——`_users:<账户>` 字面不变；ACL 编辑在 ≤0.3.11 桌面/移动端对新服务端仍发数字 subjectId=兼容入参可用，但 GET 响应已无数字 id——旧 UI 若回显 subjectId 会显示为空，属显示降级）；移动端 filemanagemobile 本批未适配，适配清单见根 CHANGELOG。
 
 ## [0.2.9] - 2026-10-16（版本号对齐批：配套 Client 0.3.9 修复批；tag 由维护者打）
 

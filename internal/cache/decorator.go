@@ -103,11 +103,28 @@ func (s *cached) UpdateUserRoots(id int64, roots []string) error {
 	return s.c.DropUser(id)
 }
 
+func (s *cached) UpdateUserNickname(id int64, nickname string) error {
+	if err := s.Store.UpdateUserNickname(id, nickname); err != nil {
+		return err
+	}
+	return s.c.DropUser(id)
+}
+
 func (s *cached) UpdateUserRole(id int64, role string) error {
 	if err := s.Store.UpdateUserRole(id, role); err != nil {
 		return err
 	}
 	return s.c.DropUser(id)
+}
+
+// RewritePhysicalPath 透传后全量清空缓存（0.2.11 布局迁移仅发生在启动/换库
+// 装配期，跨七表批量改写无法逐键失效，全清最稳妥且代价可忽略）。
+func (s *cached) RewritePhysicalPath(rootID, oldPrefix, newPrefix string) (int64, error) {
+	n, err := s.Store.RewritePhysicalPath(rootID, oldPrefix, newPrefix)
+	if err != nil || n == 0 {
+		return n, err
+	}
+	return n, s.c.FlushAll()
 }
 
 func (s *cached) DeleteUser(id int64) error {

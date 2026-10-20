@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -44,16 +45,19 @@ func (s *Server) issueSession(ctx context.Context, u *store.User, clientID strin
 	return cred, nil
 }
 
-// userView 对外输出的用户信息（永不含密码哈希）。
+// userView 管理面输出的用户信息（永不含密码哈希）。0.2.11 起含 nickname
+// （昵称可改可重复，仅展示用）。注意：本视图只出现在**管理端口**响应与登录
+// 响应 user 字段——管理台是服务端管理面（非"客户端"），按需求4 决策保留
+// 数字用户 id 供 REST 寻址；用户端口响应面绝不使用 id。
 // 超管为合成用户（0.1.0 需求32）：id=0 + super:true，无建号时间。
 func userView(u *store.User) map[string]any {
 	if u != nil && u.ID == store.SuperAdminID {
 		return map[string]any{
-			"id": u.ID, "username": u.Username, "role": u.Role, "super": true,
+			"id": u.ID, "username": u.Username, "nickname": u.Nickname, "role": u.Role, "super": true,
 		}
 	}
 	return map[string]any{
-		"id": u.ID, "username": u.Username, "role": u.Role,
+		"id": u.ID, "username": u.Username, "nickname": u.Nickname, "role": u.Role,
 		"allowedRoots": u.AllowedRoots, "createdAt": u.CreatedAt,
 	}
 }
@@ -86,9 +90,11 @@ func (s *Server) issueSuperSession(ctx context.Context) (string, error) {
 }
 
 // handleLogin POST /api/v1/auth/login {username,password,clientId?}
-// 0.2.4 响应收敛：用户端口普通用户成功**只回 {"token}**（单一无透明随机凭证，
-// 身份/角色/有效期全存服务端认证图，客户端零格式假设）；管理台登录（admin 端口，
-// adminModeKey）保留 {"token","user"}——控制台靠 user.role 做进入门禁与顶栏显示。
+// 0.2.4 响应收敛：普通用户成功**只回 {"token"}**（单一无透明随机凭证，
+// 身份/角色/有效期全存服务端认证图，客户端零格式假设；0.2.11 起 username
+// 语义=账户，昵称经 GET /auth/me 单独获取，登录响应形状不变）。
+// 0.2.11 端口彻底拆分：本端点**只在用户端口**——超管/DB 管理员凭据一律 403
+// （管理台登录走 POST /api/v1/admin/login，两 handler 不再共享分叉）。
 // clientId：客户端唯一标识（可选，≤64 字符）——提供即绑定本凭证（逐请求核对
 // X-Client-Id 头）；不提供=未绑定（旧客户端/移动端，行为同前）。
 func (s *Server) handleLogin(c *gin.Context) {
@@ -110,12 +116,14 @@ func (s *Server) handleLogin(c *gin.Context) {
 	ip := clientIP(c)
 	bKey := "login|" + req.Username
 	if s.guard.Blocked(bKey, ip) {
+		logx.WarnT(traceOf(c), "login: 防爆破锁定生效 account=%q ip=%s", req.Username, ip)
 		s.audit(c, store.AuditLoginFail, req.Username, 0, "", "", "locked (too many failures) from "+ip)
 		writeErr(c, http.StatusTooManyRequests, errors.New("too many failed attempts, try later"))
 		return
 	}
-	// ---- 超管优先（0.1.0 需求32/33/36）：账户文件不依赖数据库，降级模式同样可登录；
-	// 用户端口对超管一律 403（与 DB 管理员规则同文案，不泄露口令正确性）----
+	// ---- 超管优先（0.1.0 需求32/33/36）：账户文件不依赖数据库，必须先行匹配
+	// 并消耗口令校验（不泄露"该口令同时属于某 DB 账户"的可能）；
+	// 0.2.11：本端点只在用户端口——超管一律 403（管理台走 /admin/login）----
 	if s.Super != nil {
 		if m, err := s.Super.Match(req.Username); err != nil {
 			writeErr(c, http.StatusInternalServerError, err)
@@ -128,26 +136,14 @@ func (s *Server) handleLogin(c *gin.Context) {
 			}
 			if !ok {
 				s.guard.Fail(bKey, ip)
+				logx.DebugT(traceOf(c), "login: 口令不符（超管名命中）account=%q ip=%s", req.Username, ip)
 				s.audit(c, store.AuditLoginFail, req.Username, store.SuperAdminID, "", "", "bad username or password (superadmin)")
 				writeErr(c, http.StatusUnauthorized, errors.New("bad username or password"))
 				return
 			}
-			if !c.GetBool(adminModeKey) {
-				s.audit(c, store.AuditLoginFail, req.Username, store.SuperAdminID, "", "", "admin login rejected on user port")
-				writeErr(c, http.StatusForbidden, errors.New("管理员账号请使用服务端管理界面登录"))
-				return
-			}
-			s.guard.Reset(bKey, ip)
-			s.audit(c, store.AuditLogin, req.Username, store.SuperAdminID, "", "", "superadmin login ok")
-			cred, err := s.issueSuperSession(c.Request.Context())
-			if err != nil {
-				writeErr(c, http.StatusInternalServerError, err)
-				return
-			}
-			writeJSON(c, http.StatusOK, map[string]any{
-				"token": cred,
-				"user":  userView(&store.User{ID: store.SuperAdminID, Username: req.Username, Role: store.RoleAdmin}),
-			})
+			logx.WarnT(traceOf(c), "login: 超管凭证在用户端口登录被拒（需求36）account=%q ip=%s", req.Username, ip)
+			s.audit(c, store.AuditLoginFail, req.Username, store.SuperAdminID, "", "", "admin login rejected on user port")
+			writeErr(c, http.StatusForbidden, errors.New("管理员账号请使用服务端管理界面登录"))
 			return
 		}
 	}
@@ -169,8 +165,9 @@ func (s *Server) handleLogin(c *gin.Context) {
 		writeErr(c, http.StatusUnauthorized, errors.New("bad username or password"))
 		return
 	}
-	// 需求11：管理员账号不可在客户端（用户端口）登录，仅限管理台。
-	if u.Role == store.RoleAdmin && !c.GetBool(adminModeKey) {
+	// 需求11/36：管理员账号不可在客户端（用户端口）登录，仅限管理台。
+	if u.Role == store.RoleAdmin {
+		logx.WarnT(traceOf(c), "login: 管理员凭证在用户端口登录被拒（需求36）account=%q ip=%s", req.Username, ip)
 		s.audit(c, store.AuditLoginFail, req.Username, u.ID, "", "", "admin login rejected on user port")
 		writeErr(c, http.StatusForbidden, errors.New("管理员账号请使用服务端管理界面登录"))
 		return
@@ -182,14 +179,98 @@ func (s *Server) handleLogin(c *gin.Context) {
 		writeErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	if u.Role == store.RoleAdmin {
-		// 走到这里必是管理台登录（用户端口 admin 已在上面 403）：保留 user 概要
-		// ——控制台门禁与顶栏依赖（0.2.4 明示决策）。
-		writeJSON(c, http.StatusOK, map[string]any{"token": cred, "user": userView(u)})
-		return
-	}
+	logx.InfoT(traceOf(c), "login: 用户端口登录成功 account=%q ip=%s bound=%v", u.Username, ip, req.ClientID != "")
 	// 用户端口普通用户：只回单一无透明凭证，身份全存认证图。
 	writeJSON(c, http.StatusOK, map[string]any{"token": cred})
+}
+
+// handleAdminLogin POST /api/v1/admin/login {username,password}（0.2.11 端口
+// 彻底拆分）：管理台专用登录——超管（账户文件，无库同样可登）与 DB 管理员
+// （role=admin）两条分支，响应保留 {"token","user"}（控制台门禁与顶栏依赖）。
+// 普通用户账户在此一律 403（用户端口才是它们的家）。注册在无 maintenanceGate/
+// 无 authCtx/无 requireDB 的裸组上：暂停期与降级模式操作员永不被锁死
+// （0.2.4 起管理台不再复用用户端口 /auth/login，本端点独立成面）。
+// clientId 不参与：管理台会话恒不做客户端绑定（同 0.2.4 语义）。
+func (s *Server) handleAdminLogin(c *gin.Context) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decode(c, &req); err != nil || req.Username == "" {
+		writeErr(c, http.StatusBadRequest, errors.New("username and password required"))
+		return
+	}
+	ip := clientIP(c)
+	bKey := "login|" + req.Username // 与用户端口共用防爆破键（同一账户同一计数面）
+	if s.guard.Blocked(bKey, ip) {
+		logx.WarnT(traceOf(c), "admin-login: 防爆破锁定生效 account=%q ip=%s", req.Username, ip)
+		s.audit(c, store.AuditLoginFail, req.Username, 0, "", "", "locked (too many failures) from "+ip)
+		writeErr(c, http.StatusTooManyRequests, errors.New("too many failed attempts, try later"))
+		return
+	}
+	if s.Super != nil {
+		if m, err := s.Super.Match(req.Username); err != nil {
+			writeErr(c, http.StatusInternalServerError, err)
+			return
+		} else if m {
+			ok, verr := s.Super.Verify(req.Username, req.Password)
+			if verr != nil {
+				writeErr(c, http.StatusInternalServerError, verr)
+				return
+			}
+			if !ok {
+				s.guard.Fail(bKey, ip)
+				s.audit(c, store.AuditLoginFail, req.Username, store.SuperAdminID, "", "", "bad username or password (superadmin)")
+				writeErr(c, http.StatusUnauthorized, errors.New("bad username or password"))
+				return
+			}
+			s.guard.Reset(bKey, ip)
+			s.audit(c, store.AuditLogin, req.Username, store.SuperAdminID, "", "", "superadmin login ok")
+			cred, err := s.issueSuperSession(c.Request.Context())
+			if err != nil {
+				writeErr(c, http.StatusInternalServerError, err)
+				return
+			}
+			logx.InfoT(traceOf(c), "admin-login: 超管登录管理台成功 account=%q ip=%s", req.Username, ip)
+			writeJSON(c, http.StatusOK, map[string]any{
+				"token": cred,
+				"user":  userView(&store.User{ID: store.SuperAdminID, Username: req.Username, Role: store.RoleAdmin}),
+			})
+			return
+		}
+	}
+	if !s.dbReady() {
+		writeErr(c, http.StatusServiceUnavailable, errNoDB)
+		return
+	}
+	u, err := s.Store.GetUserByName(req.Username)
+	if err != nil {
+		s.guard.Fail(bKey, ip)
+		s.audit(c, store.AuditLoginFail, req.Username, 0, "", "", "bad username or password")
+		writeErr(c, http.StatusUnauthorized, errors.New("bad username or password"))
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(req.Password)); err != nil {
+		s.guard.Fail(bKey, ip)
+		s.audit(c, store.AuditLoginFail, req.Username, u.ID, "", "", "bad username or password")
+		writeErr(c, http.StatusUnauthorized, errors.New("bad username or password"))
+		return
+	}
+	if u.Role != store.RoleAdmin {
+		logx.WarnT(traceOf(c), "admin-login: 普通账户在管理端口登录被拒 account=%q ip=%s", req.Username, ip)
+		s.audit(c, store.AuditLoginFail, req.Username, u.ID, "", "", "normal user rejected on admin port")
+		writeErr(c, http.StatusForbidden, errors.New("普通账户请使用客户端（用户端口）登录"))
+		return
+	}
+	s.guard.Reset(bKey, ip)
+	s.audit(c, store.AuditLogin, u.Username, u.ID, "", "", "admin console login ok")
+	cred, err := s.issueSession(c.Request.Context(), u, "")
+	if err != nil {
+		writeErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	logx.InfoT(traceOf(c), "admin-login: DB 管理员登录管理台成功 account=%q ip=%s", u.Username, ip)
+	writeJSON(c, http.StatusOK, map[string]any{"token": cred, "user": userView(u)})
 }
 
 // handleRefresh 已于 0.2.4 移除：活跃滑动续期由 authCtx→Touch 在服务端无感完成
@@ -286,23 +367,79 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		return
 	}
 	_ = s.Auth.RevokeUser(c.Request.Context(), cur.ID) // 认证图三层全清（含本次），强制重新登录
+	logx.InfoT(traceOf(c), "auth: 用户自助改密成功（会话全部吊销）account=%q", cur.Username)
 	s.audit(c, store.AuditUserUpdate, cur.Username, cur.ID, "", "", "password changed by self")
 	writeJSON(c, http.StatusOK, map[string]any{"ok": true, "reauthRequired": true})
 }
 
-// handleMe GET /api/v1/auth/me → **仅回 {"username"}（0.2.4 收敛）**。
-// 客户端只持 token、不查询自身身份：角色/权限全在服务端认证图内判给（jail/ACL），
-// 客户端 UI 永不需要 role；档案字段（id/role/allowedRoots/createdAt）不再对外
-// （roots 端点本就给出可访问目录清单，是业务数据而非身份）。不查库——用户名取自
-// 认证图条目；旧客户端读取 role 的分支自然落默认值（桌面 0.3.5 显示"普通用户"、
-// 移动端 MeInfo.role 空串），无害降级。
+// handleMe GET /api/v1/auth/me → {"username": 账户, "nickname": 昵称}
+// （0.2.4 收敛仅回 username；0.2.11 加性补 nickname——需求4"登陆后显示昵称"
+// 的获取通道，登录响应形状保持不变）。客户端只持 token、不查询自身身份：
+// 角色/权限全在服务端认证图内判给（jail/ACL）；数字用户 id 绝不出现在用户
+// 端口。昵称可改，故必须现读库（认证图条目的 Username=账户 冻结值依旧不查库
+// 即可判定身份；本端点位于 requireDB 的 auth 组内，一次性读取可接受，
+// 热路径 authCtx 的零查库红线不破）。
 func (s *Server) handleMe(c *gin.Context) {
 	u := currentUser(c)
 	if u == nil {
 		writeErr(c, http.StatusUnauthorized, errors.New("login required"))
 		return
 	}
-	writeJSON(c, http.StatusOK, map[string]any{"username": u.Username})
+	if cur, err := s.Store.GetUserByID(u.ID); err == nil {
+		writeJSON(c, http.StatusOK, map[string]any{"username": cur.Username, "nickname": cur.Nickname})
+		return
+	}
+	// 库读失败退化用认证图条目（昵称空=客户端回退显示账户）
+	writeJSON(c, http.StatusOK, map[string]any{"username": u.Username, "nickname": ""})
+}
+
+// handleUpdateProfile PUT /api/v1/auth/profile {nickname}
+// （0.2.11 需求4）：用户自助改昵称——昵称可重复、可修改，仅展示用，绝不进
+// 路径/键/会话（改昵称**不**吊销会话、不重启登录）。超管不经此端点。
+func (s *Server) handleUpdateProfile(c *gin.Context) {
+	u := currentUser(c)
+	if u == nil {
+		writeErr(c, http.StatusUnauthorized, errors.New("login required"))
+		return
+	}
+	if u.ID == store.SuperAdminID {
+		writeErr(c, http.StatusBadRequest, errors.New("超级管理员账户经管理台\"超级管理员\"页（账户文件）维护"))
+		return
+	}
+	var req struct {
+		Nickname string `json:"nickname"`
+	}
+	if err := decode(c, &req); err != nil {
+		writeErr(c, http.StatusBadRequest, err)
+		return
+	}
+	nick, code, err := normalizeNickname(req.Nickname)
+	if err != nil {
+		writeErr(c, code, err)
+		return
+	}
+	if err := s.Store.UpdateUserNickname(u.ID, nick); err != nil {
+		writeErr(c, statusOf(err), err)
+		return
+	}
+	logx.InfoT(traceOf(c), "auth: 用户自助改昵称 account=%q cleared=%v", u.Username, nick == "")
+	s.audit(c, store.AuditUserUpdate, u.Username, u.ID, "", "", "nickname updated by self")
+	writeJSON(c, http.StatusOK, map[string]any{"ok": true, "username": u.Username, "nickname": nick})
+}
+
+// normalizeNickname 昵称校验（0.2.11）：首尾去空白；≤64 字符（rune 计）；
+// 拒绝控制字符（含换行/制表）；允许空串=清除昵称（显示回退账户）。
+func normalizeNickname(raw string) (string, int, error) {
+	s := strings.TrimSpace(raw)
+	if utf8.RuneCountInString(s) > 64 {
+		return "", http.StatusBadRequest, errors.New("昵称过长（最多 64 字符）")
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return "", http.StatusBadRequest, errors.New("昵称不得含控制字符")
+		}
+	}
+	return s, 0, nil
 }
 
 // handleHealth GET /api/v1/health（公开，balancer 健康检查也依赖它）。
@@ -331,28 +468,34 @@ func bcryptHash(pw string) (string, error) {
 }
 
 // createUser 唯一的用户创建入口（管理台建号专用，无自助注册）。
-// 需求3：用户名必须可作目录名；建号成功后自动分配家目录
-// <dataDir>/Users/<用户名>（含 .fmtrash 回收站所在 jail，用户只能访问该目录，
-// 管理员可再追加其他分配）。
-func (s *Server) createUser(username, password, role string, roots []string) (*store.User, int, error) {
+// 0.2.11 需求4：账户（username，唯一且可作目录名片段）与昵称（nickname，
+// 可改可重复、可空=显示回退账户）分离；建号成功后自动分配家目录
+// <dataDir>/Users/user_<账户>_<用户id> 与并级回收站目录（0.2.11 需求5），
+// 用户只能访问该目录，管理员可再追加其他分配。**目录名含自增永不复用的
+// 用户 id——删除账户后同名重建必落新目录，串目录复用问题从根上消除。**
+func (s *Server) createUser(username, nickname, password, role string, roots []string) (*store.User, int, error) {
 	if err := fileops.UsernameAsDir(username); err != nil {
 		return nil, http.StatusBadRequest, err
+	}
+	nick, code, err := normalizeNickname(nickname)
+	if err != nil {
+		return nil, code, err
 	}
 	// 需求33：超管账户名保留（超管在文件、不在 users 表——若放同名 DB 账户进来，
 	// handleLogin 的超管优先分支会永久遮蔽它，制造无法登录的死账户）。
 	if s.Super != nil {
 		if m, err := s.Super.Match(username); err == nil && m {
-			return nil, http.StatusBadRequest, errors.New("该用户名已被超级管理员保留，请换一个")
+			return nil, http.StatusBadRequest, errors.New("该账户名已被超级管理员保留，请换一个")
 		}
 	}
 	hash, err := bcryptHash(password)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	u := &store.User{Username: username, PasswordHash: hash, Role: role, AllowedRoots: roots}
+	u := &store.User{Username: username, Nickname: nick, PasswordHash: hash, Role: role, AllowedRoots: roots}
 	if err := s.Store.CreateUser(u); err != nil {
 		if errors.Is(err, store.ErrExists) {
-			return nil, http.StatusConflict, errors.New("username already exists")
+			return nil, http.StatusConflict, errors.New("account already exists")
 		}
 		return nil, http.StatusInternalServerError, err
 	}

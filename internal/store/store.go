@@ -54,6 +54,7 @@ type Store interface {
 	GetUserByID(id int64) (*User, error)
 	ListUsers() ([]*User, error)
 	UpdateUserPassword(id int64, hash string) error
+	UpdateUserNickname(id int64, nickname string) error // 0.2.11：昵称可改可重复，仅展示用
 	UpdateUserRoots(id int64, roots []string) error // 旧字段；仅作迁移输入
 	UpdateUserRole(id int64, role string) error
 	DeleteUser(id int64) error
@@ -67,6 +68,13 @@ type Store interface {
 	// server_meta：一次性数据迁移标记等键值（不存在返回 ""）
 	GetMeta(key string) (string, error)
 	SetMeta(key, value string) error
+
+	// RewritePhysicalPath 将指定物理根下**一切按路径键控**的存量行的路径前缀
+	// 由 oldPrefix 改写为 newPrefix（命中 path==old 或 path 以 old+"/" 开头；
+	// 覆盖 file_metas/ai_descriptions/trash_items/folder_acls/share_links/
+	// file_versions/upload_sessions）。0.2.11 家目录布局迁移（userhomes.v8）
+	// 专用；单事务/单写锁内完成，幂等（二次调用返回 0）。返回改写行数。
+	RewritePhysicalPath(rootID, oldPrefix, newPrefix string) (int64, error)
 
 	// 文件元数据
 	PutFileMeta(m *FileMeta) error
