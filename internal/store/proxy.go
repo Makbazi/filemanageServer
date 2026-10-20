@@ -179,12 +179,28 @@ func (p *Proxy) UpdateUserRoots(id int64, roots []string) error {
 	return s.UpdateUserRoots(id, roots)
 }
 
+func (p *Proxy) UpdateUserNickname(id int64, nickname string) error {
+	s := p.Current()
+	if s == nil {
+		return ErrNoDB
+	}
+	return s.UpdateUserNickname(id, nickname)
+}
+
 func (p *Proxy) UpdateUserRole(id int64, role string) error {
 	s := p.Current()
 	if s == nil {
 		return ErrNoDB
 	}
 	return s.UpdateUserRole(id, role)
+}
+
+func (p *Proxy) RewritePhysicalPath(rootID, oldPrefix, newPrefix string) (int64, error) {
+	s := p.Current()
+	if s == nil {
+		return 0, ErrNoDB
+	}
+	return s.RewritePhysicalPath(rootID, oldPrefix, newPrefix)
 }
 
 func (p *Proxy) DeleteUser(id int64) error {

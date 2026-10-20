@@ -21,6 +21,7 @@ func pgDDL() []string {
 		`CREATE TABLE IF NOT EXISTS users (
 			id BIGSERIAL PRIMARY KEY,
 			username TEXT NOT NULL UNIQUE,
+			nickname TEXT NOT NULL DEFAULT '',
 			password_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'user',
 			allowed_roots TEXT NOT NULL DEFAULT '[]',
@@ -117,11 +118,15 @@ func pgDDL() []string {
 	}
 }
 
-// pgEnsureExtra 存量库加列守卫（0.2.4 auth_sessions.client_id；只增不改，
-// 属幂等 DDL 清单的组成部分——pg 原生支持 ADD COLUMN IF NOT EXISTS）。
+// pgEnsureExtra 存量库加列守卫（0.2.4 auth_sessions.client_id、
+// 0.2.11 users.nickname；只增不改，属幂等 DDL 清单的组成部分——pg 原生支持
+// ADD COLUMN IF NOT EXISTS）。
 func pgEnsureExtra(db *gorm.DB) error {
 	if err := db.Exec("ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS client_id TEXT NOT NULL DEFAULT ''").Error; err != nil {
 		return fmt.Errorf("migrate: add client_id: %w", err)
+	}
+	if err := db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname TEXT NOT NULL DEFAULT ''").Error; err != nil {
+		return fmt.Errorf("migrate: add users.nickname: %w", err)
 	}
 	return nil
 }

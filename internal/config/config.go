@@ -117,7 +117,7 @@ type BalancerCfg struct {
 // 按大小轮转改名链 .log.1/.log.2/…；stdout 同步镜像。敏感值（口令/令牌/
 // 请求体/头）永不入日志——纪律见 logx 包注释，等级默认 warn。
 type LogConf struct {
-	Level    string `json:"level"`    // debug|info|warn|error，默认 warn
+	Level    string `json:"level"`    // 0.2.11 六级：trace|debug|info|warn|error|fatal，默认 warn
 	Dir      string `json:"dir"`      // 空=dataDir/logs
 	MaxMB    int    `json:"maxMB"`    // 单文件上限 MB，默认 10
 	MaxFiles int    `json:"maxFiles"` // 最多保留文件数（含当前），默认 3
@@ -386,10 +386,10 @@ func finalize(c *Config) (*Config, error) {
 	if c.Auth.TouchWriteEvery == "" {
 		c.Auth.TouchWriteEvery = "10m"
 	}
-	// 日志（0.2.7）：等级非法值收敛为 warn（默认等级，不因配置笔误拒绝启动）；
-	// 轮转上限收敛——maxMB<=0→10、maxFiles<1→3、>10→10（防失控占用磁盘）。
+	// 日志（0.2.7；0.2.11 六级化）：等级非法值收敛为 warn（默认等级，不因配置
+	// 笔误拒绝启动）；轮转上限收敛——maxMB<=0→10、maxFiles<1→3、>10→10（防失控占用磁盘）。
 	switch strings.ToLower(strings.TrimSpace(c.Log.Level)) {
-	case "debug", "info", "warn", "error":
+	case "trace", "debug", "info", "warn", "error", "fatal":
 		c.Log.Level = strings.ToLower(strings.TrimSpace(c.Log.Level))
 	default:
 		c.Log.Level = "warn"
@@ -468,8 +468,9 @@ func finalize(c *Config) (*Config, error) {
 // 该目录作为服务端内部合成根（store.HomeRootID）注入 scope，不写回配置文件 roots。
 func (c *Config) UsersDir() string { return filepath.Join(c.DataDir, "Users") }
 
-// HomeDir 某用户的家目录绝对路径（用户名须先经 fileops.UsernameAsDir 校验）。
-func (c *Config) HomeDir(username string) string { return filepath.Join(c.UsersDir(), username) }
+// HomeDir 家目录绝对路径（0.2.11：name 传 fileops.HomeDirName 结果，即
+// <dataDir>/Users/user_<账户>_<用户id>；旧布局调用传账户名同样成立）。
+func (c *Config) HomeDir(name string) string { return filepath.Join(c.UsersDir(), name) }
 
 // TLSDir 自签证书目录（归入 dataDir，替代原硬编码 ./data/tls）。
 func (c *Config) TLSDir() string { return filepath.Join(c.DataDir, "tls") }
@@ -605,7 +606,7 @@ func WriteExample(path string) error {
 		"tls":                map[string]any{"enabled": false, "certFile": "", "keyFile": "", "autoSelfSign": true},
 		"session":            map[string]any{"accessTTL": "1h", "idleDays": 21},
 		"auth":               map[string]any{"memMaxEntries": 200000, "memTTL": "5m", "redisMaxEntries": 5000000, "sweepInterval": "10m", "touchWriteEvery": "10m"}, // 三层认证图（0.2.3）：进程内 LRU 上限/新鲜期、redis 上限、清扫周期、续期写回间隔
-		"log":                map[string]any{"level": "warn", "dir": "", "maxMB": 10, "maxFiles": 3},                                                                // 服务端日志（0.2.7）：等级 debug|info|warn|error（默认 warn）；dir 空=<dataDir>/logs；含当前文件在内最多 maxFiles 个、单文件 ≤maxMB MB 按大小轮转；敏感值（口令/令牌/请求体）永不入日志
+		"log":                map[string]any{"level": "warn", "dir": "", "maxMB": 10, "maxFiles": 3},                                                                // 服务端日志（0.2.7；0.2.11 六级）：等级 trace|debug|info|warn|error|fatal（默认 warn）；dir 空=<dataDir>/logs；含当前文件在内最多 maxFiles 个、单文件 ≤maxMB MB 按大小轮转；敏感值（口令/令牌/请求体/Authorization）永不入日志
 		"anonymous":          map[string]any{"enabled": true},
 		"rateLimit":          map[string]any{"uploadKBps": 0, "downloadKBps": 0, "qps": 0},
 		"corsAllowOrigins":   []string{},

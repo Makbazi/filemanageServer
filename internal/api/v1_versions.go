@@ -37,11 +37,17 @@ func (s *Server) handleVersionList(c *gin.Context) {
 		writeErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	if vers == nil {
-		vers = []*store.FileVersion{}
+	// 0.2.11 响应面收敛：不再转储 store 行（原含物理 rootId/path、storeId 与
+	// 数字 createdBy——物理键与用户 id 均不对客户端可见），只回展示所需字段。
+	view := make([]map[string]any, 0, len(vers))
+	for _, v := range vers {
+		view = append(view, map[string]any{
+			"id": v.ID, "versionNo": v.VersionNo, "size": v.Size,
+			"hash": v.Hash, "createdAt": v.CreatedAt,
+		})
 	}
 	writeJSON(c, http.StatusOK, map[string]any{
-		"versions":    vers,
+		"versions":    view,
 		"maxVersions": s.Cfg.Versions.MaxVersions,
 		"enabled":     s.Cfg.Versions.Enabled,
 	})

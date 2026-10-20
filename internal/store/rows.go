@@ -30,6 +30,7 @@ func i2b(n int64) bool { return n != 0 }
 type userRow struct {
 	ID           int64     `gorm:"column:id;primaryKey;autoIncrement"`
 	Username     string    `gorm:"column:username"`
+	Nickname     string    `gorm:"column:nickname"` // 0.2.11 加列（只增不改）
 	PasswordHash string    `gorm:"column:password_hash"`
 	Role         string    `gorm:"column:role"`
 	AllowedRoots string    `gorm:"column:allowed_roots"` // JSON 文本
@@ -40,14 +41,15 @@ func (userRow) TableName() string { return "users" }
 
 func (r userRow) fromUser(u *User) userRow {
 	b, _ := json.Marshal(u.AllowedRoots)
-	return userRow{ID: u.ID, Username: u.Username, PasswordHash: u.PasswordHash,
+	return userRow{ID: u.ID, Username: u.Username, Nickname: u.Nickname, PasswordHash: u.PasswordHash,
 		Role: u.Role, AllowedRoots: string(b), CreatedAt: u.CreatedAt}
 }
 
 func (r userRow) toUser() *User {
 	var u User
 	_ = json.Unmarshal([]byte(r.AllowedRoots), &u.AllowedRoots)
-	u.ID, u.Username, u.PasswordHash, u.Role, u.CreatedAt = r.ID, r.Username, r.PasswordHash, r.Role, r.CreatedAt
+	u.ID, u.Username, u.Nickname, u.PasswordHash, u.Role, u.CreatedAt =
+		r.ID, r.Username, r.Nickname, r.PasswordHash, r.Role, r.CreatedAt
 	return &u
 }
 

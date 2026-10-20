@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"sync/atomic"
 	"time"
+
+	"filemanageServer/internal/logx"
 )
 
 // Balancer 轮询反向代理。
@@ -53,7 +55,7 @@ func New(workers []string) (*Balancer, error) {
 		}
 		wp.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
 			w.up.Store(false) // 被动健康检查：转发失败即摘除，等待主动探测恢复
-			log.Printf("balancer: worker %s 失败，暂时摘除: %v", w.addr, err)
+			logx.Warn("balancer: worker %s 失败，暂时摘除: %v", w.addr, err)
 			rw.WriteHeader(http.StatusBadGateway)
 			_, _ = rw.Write([]byte(`{"error":"all workers unavailable"}`))
 		}

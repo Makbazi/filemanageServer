@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -46,8 +47,10 @@ func (s *Server) requireDB() gin.HandlerFunc {
 
 // maintenanceGate 0.1.1 维护暂停屏障：切换（含迁移）/导出窗口与手动暂停期间，
 // 冻结全部业务/管理写读端点（503），保证源/目标存储在该窗口内无并发变更。
-// 豁免：/api/v1/health（负载均衡探测）与 /api 版本发现；管理台登录与 /admin/db
-// 配置面不经本守卫（挂在各自分组之外），操作员永远可解除暂停。
+// 豁免：/api/v1/health（负载均衡探测）与 /api 版本发现；管理台登录
+// （0.2.11 专属端点 POST /api/v1/admin/login）与 /admin/db 配置面不经本守卫
+// （挂在各自分组之外），操作员永远可解除暂停——用户端口 /auth/login 仍在
+// 屏障内（"暂停冻结客户端操作"是既定语义）。
 func (s *Server) maintenanceGate() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if s.Paused() && c.Request.URL.Path != "/api/v1/health" {
@@ -85,6 +88,9 @@ func (s *Server) authCtx() gin.HandlerFunc {
 		e, err := s.Auth.Lookup(c.Request.Context(), ts)
 		if err != nil {
 			if errors.Is(err, auth.ErrBadCredential) {
+				// 坏/过期凭证属常态流量（闲置过期、退出后旧 token）——debug 级，
+				// 默认 warn 下静默；loggerGin 的 401 Warn 行保留状态可见性。
+				logx.DebugT(traceOf(c), "auth: 凭证无效或已过期 — 401 from=%s", c.Request.RemoteAddr)
 				writeErr(c, http.StatusUnauthorized, errors.New("token invalid or expired"))
 			} else {
 				writeErr(c, http.StatusServiceUnavailable, err) // 存储故障=服务不可用，不是坏凭证
@@ -93,6 +99,7 @@ func (s *Server) authCtx() gin.HandlerFunc {
 			return
 		}
 		if e.Kind != store.AuthKindUser { // share 凭证走的是 /s/ 链路专用校验，永不代表身份
+			logx.DebugT(traceOf(c), "auth: share 凭证被当身份使用 — 401 account=%q", e.Username)
 			writeErr(c, http.StatusUnauthorized, errors.New("token invalid or expired"))
 			c.Abort()
 			return
@@ -102,6 +109,10 @@ func (s *Server) authCtx() gin.HandlerFunc {
 		// 一律重新登录取新凭证）。未绑定会话（旧客户端/移动端/管理台，
 		// ClientID=""）不看头，行为同前；多客户端同账号各持己凭证互不挤占。
 		if e.ClientID != "" && c.Request.Header.Get("X-Client-Id") != e.ClientID {
+			// 绑定凭证在他设备/无标头形态出现——冒用或重装，安全事件（不含任何凭证值，
+			// X-Client-Id 是设备标识非机密，可留档供追溯）。
+			logx.WarnT(traceOf(c), "auth: X-Client-Id 核对不符（绑定会话）— 401 account=%q path=%s",
+				e.Username, sanitizeLogTarget(c.Request.URL))
 			writeErr(c, http.StatusUnauthorized, errors.New("client identity mismatch, please login again"))
 			c.Abort()
 			return
@@ -113,12 +124,15 @@ func (s *Server) authCtx() gin.HandlerFunc {
 				return
 			}
 			if !c.GetBool(adminModeKey) {
+				logx.WarnT(traceOf(c), "auth: 超管凭证出现在用户端口（需求36 拒绝）— 403 account=%q path=%s",
+					e.Username, sanitizeLogTarget(c.Request.URL))
 				writeErr(c, http.StatusForbidden, errors.New("admin accounts cannot be used on the client API; use the admin console"))
 				c.Abort()
 				return
 			}
 			gen, serr := s.Super.Generation()
 			if serr != nil || gen != e.Gen {
+				logx.WarnT(traceOf(c), "auth: 超管凭据纪元已推进（口令轮换/账户文件重置）— 旧会话吊销 account=%q", e.Username)
 				writeErr(c, http.StatusUnauthorized, errors.New("superadmin credential changed (password rotated or account file reset), please login again"))
 				c.Abort()
 				return
@@ -135,6 +149,8 @@ func (s *Server) authCtx() gin.HandlerFunc {
 		// 端口隔离判据取自认证图条目（登录时刻的角色快照）：管理员角色变更即
 		// 按用户撤权（见 v1_admin），条目角色与库内角色不会出现可被利用的分歧。
 		if e.Role == store.RoleAdmin && !c.GetBool(adminModeKey) {
+			logx.WarnT(traceOf(c), "auth: 管理员凭证出现在用户端口（需求36 拒绝）— 403 account=%q path=%s",
+				e.Username, sanitizeLogTarget(c.Request.URL))
 			writeErr(c, http.StatusForbidden, errors.New("admin accounts cannot be used on the client API; use the admin console"))
 			c.Abort()
 			return
@@ -143,6 +159,9 @@ func (s *Server) authCtx() gin.HandlerFunc {
 			s.Auth.Touch(e, s.Cfg.IdleDuration())
 		}
 		c.Set(userKey, &store.User{ID: e.UserID, Username: e.Username, Role: e.Role})
+		// trace 级细节（六级新增形态：生产默认关闭，排障时 config log.level=trace）
+		logx.TraceT(traceOf(c), "auth: 身份解析成功 account=%q uid=%d adminPort=%v",
+			e.Username, e.UserID, c.GetBool(adminModeKey))
 		c.Next()
 	}
 }
@@ -273,18 +292,43 @@ func traceOf(c *gin.Context) string {
 	return ""
 }
 
-// loggerGin 请求日志（0.2.7 重构走 logx）：状态码分级 5xx=Error、4xx=Warn、
-// 其余=Info（默认等级 warn 下只留异常请求）；行格式
-// `trace=<id> <METHOD> <path?query> <status> <dur> from=<remote>`。
-// 敏感纪律：绝不记录请求头与请求体（凭证/口令只存在于二者之中）。
+// sanitizeLogTarget 请求目标脱敏（0.2.11 敏感纪律扩展）：
+// 分享访问凭证就藏在 URL 里——`/s/<token>` 路径段与查询参数 `st` 同 share/verify
+// 口令类参数值一律遮蔽（保留键名便于排障）。0.2.7 的纪律"不记头/体"之外，
+// 本函数补齐"URL 携带凭证"这一形态；未知解析异常整体遮蔽查询段，绝不冒泡原值。
+func sanitizeLogTarget(u *url.URL) string {
+	path := u.Path
+	if segs := strings.SplitN(path, "/", 4); len(segs) >= 3 && segs[1] == "s" && segs[2] != "" {
+		path = "/s/**"
+		if len(segs) == 4 && segs[3] != "" {
+			path += "/" + segs[3]
+		}
+	}
+	if u.RawQuery == "" {
+		return path
+	}
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return path + "?<unparsed>"
+	}
+	for _, k := range []string{"st", "token", "shareToken", "password", "pass", "pwd"} {
+		if _, ok := q[k]; ok {
+			q[k] = []string{"**"}
+		}
+	}
+	return path + "?" + q.Encode()
+}
+
+// loggerGin 请求日志（0.2.7 重构走 logx；0.2.11 六级 + URL 凭证脱敏）：
+// 状态码分级 5xx=Error、4xx=Warn、其余=Info（默认等级 warn 下只留异常请求）；
+// 行格式 `trace=<id> <METHOD> <path?query(脱敏)> <status> <dur> from=<remote>`。
+// 敏感纪律：绝不记录请求头与请求体；URL 中的分享 token/st 与口令类参数值经
+// sanitizeLogTarget 遮蔽（Bearer 凭证本就不在 URL）。
 func loggerGin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		c.Next()
-		target := c.Request.URL.Path
-		if c.Request.URL.RawQuery != "" {
-			target += "?" + c.Request.URL.RawQuery
-		}
+		target := sanitizeLogTarget(c.Request.URL)
 		status := c.Writer.Status()
 		// 先组行再以常量格式 "%s" 传入：路径/查询来自客户端，可能含 % 动词，
 		// 绝不能再被当格式串二次解释（vet printf 检查同源约束）

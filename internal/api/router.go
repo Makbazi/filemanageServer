@@ -14,24 +14,31 @@ import (
 	"filemanageServer/internal/version"
 )
 
-// Handler 用户/客户端端口路由（不含任何管理路由：/admin/ 与
-// /api/v1/admin/* 只在管理端口 AdminHandler 上可达，两端口完全独立）。
-// 返回 *gin.Engine（实现 http.Handler），main.go 以 http.Serve/ServeTLS 承载。
-// 将来新增 API 版本时：新建 registerV2(e) 并追加到 APIVersions 即可，
-// 旧版本路由保持不变（版本迭代的 API 管理）。
+// Handler 用户/客户端端口路由（0.2.11 需求1/2：不仅物理端口分离——
+// **注册集也分离**，本引擎只有 registerV1 业务面，不含任何管理路由；
+// /admin/ 与 /api/v1/admin/* 只在管理端口可达，两端口注册集零交集、
+// handler 不复用）。返回 *gin.Engine（实现 http.Handler），main.go 以
+// http.Serve/ServeTLS 承载。将来新增 API 版本时：新建 registerV2(e) 并追加
+// 到 APIVersions 即可，旧版本路由保持不变（版本迭代的 API 管理）。
 func (s *Server) Handler() *gin.Engine {
 	e := s.newEngine(s.lanFilter())
 	s.registerV1(e)
 	return e
 }
 
-// AdminHandler 管理面端口（cfg.AdminListen，默认仅 bind 127.0.0.1）路由：
-// 内嵌管理台 /admin/ + 全部管理 API + 同源复用业务端点（登录/ACL/分享总览等）。
-// adminScope 标记使路径解析按物理根全量进行（管理台直接维护物理路径，无 jail 限制）。
+// AdminHandler 管理面端口（cfg.AdminListen，默认仅 bind 127.0.0.1）路由
+// （0.2.11 需求3）：内嵌管理台 /admin/ + 全部管理 API——登录/ACL 写/分享写
+// 均为管理端口专属端点（/api/v1/admin/login、/acl、/links），**本引擎不再
+// 注册 registerV1**，管理台对业务面（/api/v1/* 非 admin、/s/:token）一律
+// 404。adminScope 标记保留两用途：authCtx 按端口分流 admin/super 会话、
+// /api 版本发现的 adminUI 字段（路径翻译层不再读取）。
 // 网络准入走 adminIPFilter（0.1.0 需求38 adminAccess，替代该引擎上的 lanOnly 判定）。
 func (s *Server) AdminHandler() *gin.Engine {
 	e := s.newEngine(s.adminIPFilter(), s.adminScope())
-	s.registerV1(e)
+	// 0.2.11 管理台专属登录：裸组（无 requireDB/authCtx/maintenanceGate）——
+	// 与 /admin/db 配置面同理由：超管无库必须可登、维护暂停期操作员绝不被锁死
+	// （修正旧版"暂停期管理台登录 503"与 middleware.go 文档不符的问题）。
+	e.Group("/api/v1/admin").POST("/login", s.handleAdminLogin)
 	// 数据库配置面注册在 requireDB 之外（降级模式可达）；0.1.0 需求33
 	// 起闸门收敛为单一态（超管/DB 管理员登录态，超管无库可用），见 v1_dbconfig.go
 	s.registerAdminDBAPI(e)
@@ -50,7 +57,8 @@ func (s *Server) AdminHandler() *gin.Engine {
 	return e
 }
 
-// adminScope 管理端口标记中间件（见 scope.go computeBases）。
+// adminScope 管理端口标记中间件（authCtx 分流 + /api adminUI 字段；
+// 0.2.11 拆分后 scope.go 翻译层不再读取）。
 func (s *Server) adminScope() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Set(adminModeKey, true)
@@ -101,12 +109,12 @@ func (s *Server) handleAPIVersions(c *gin.Context) {
 	writeJSON(c, http.StatusOK, out)
 }
 
-// registerV1 以 gin 分组注册 /api/v1 全部端点。
+// registerV1 以 gin 分组注册 /api/v1 全部**业务**端点——0.2.11 起仅注册在
+// 用户端口 Handler()（管理端口不再复用本函数，见 AdminHandler 注释）。
 // 分组即权限矩阵（CLAUDE.md 规约：依赖元数据的端点必须落在 requireDB 之内）：
-//   - public  ：健康检查、登录注册刷新（后三者需要元数据库）；
+//   - public  ：健康检查、登录（handler 内判库）；
 //   - anon    ：可选认证，降级模式（无库）下仍可用的匿名只读端点；
-//   - login   ：requireDB + 登录；
-//   - admin   ：requireDB + 管理员；
+//   - auth    ：requireDB + 登录；
 //   - share   ：分享链接匿名访问（token+密码授权，需要元数据库）。
 func (s *Server) registerV1(e *gin.Engine) {
 	v1 := e.Group("/api/v1", s.maintenanceGate()) // 0.1.1：组内统一维护暂停屏障（health 豁免）
@@ -145,6 +153,8 @@ func (s *Server) registerV1(e *gin.Engine) {
 	auth.GET("/auth/me", s.handleMe)
 	// 需求31：登录用户自助改密（校验旧密码；改后全部会话作废、强制重新登录）
 	auth.POST("/auth/change-password", s.handleChangePassword)
+	// 0.2.11 需求4：自助改昵称（仅展示名；不吊销会话、不触路径/键）
+	auth.PUT("/auth/profile", s.handleUpdateProfile)
 
 	auth.POST("/mkdir", s.handleMkdir)
 	auth.POST("/mkdirs", s.handleMkdirs) // 需求41：目录上传批量建目录（加性端点）
@@ -211,6 +221,11 @@ func (s *Server) registerAdminAPI(admin *gin.RouterGroup) {
 	admin.PUT("/groups/:id", s.handleAdminUpdateGroup)
 	admin.DELETE("/groups/:id", s.handleAdminDeleteGroup)
 	admin.GET("/acls", s.handleAdminListACLs)
+	admin.PUT("/acl", s.handleAdminACLPut) // 0.2.11 管理台专属 ACL 写（不再复用用户端口 /acl）
 	admin.GET("/links", s.handleAdminListLinks)
+	// 0.2.11 管理台专属分享链接 CRUD（物理键直传，无所有权校验；不再复用用户端口 share/links）
+	admin.POST("/links", s.handleAdminLinkCreate)
+	admin.PUT("/links/:token", s.handleAdminLinkUpdate)
+	admin.DELETE("/links/:token", s.handleAdminLinkDelete)
 	admin.GET("/audits", s.handleAdminListAudits) // 审计日志
 }

@@ -18,6 +18,7 @@ import (
 	"filemanageServer/internal/auth"
 	"filemanageServer/internal/config"
 	"filemanageServer/internal/fileops"
+	"filemanageServer/internal/logx"
 	store "filemanageServer/internal/store"
 )
 
@@ -31,21 +32,25 @@ const shareTokenTTL = 2 * time.Hour
 // linkView 链接对外视图（永不含密码哈希）。
 // 需求14：不再输出物理 rootId/path——分享访问者（含登录用户）只能通过链接
 // 本身访问，不得知悉文件的物理位置。管理端口需要物理键时用 linkViewFull。
+// 0.2.11 需求4：用户端口不再输出数字 createdBy（用户 id 不可见；创建者信息
+// 对链接管理无意义，本侧列表即"我创建的"）。
 func linkView(l *store.ShareLink) map[string]any {
 	return map[string]any{
 		"id": l.ID, "token": l.Token, "url": "/s/" + l.Token,
 		"isDir":       l.IsDir,
 		"hasPassword": l.HasPassword, "expiresAt": l.ExpiresAt,
-		"disabled": l.Disabled, "createdBy": l.CreatedBy, "createdAt": l.CreatedAt,
+		"disabled": l.Disabled, "createdAt": l.CreatedAt,
 		"expired": l.ExpiresAt != nil && l.ExpiresAt.Before(time.Now()),
 	}
 }
 
-// linkViewFull 管理端口视图：含物理键（仅 AdminHandler 引擎可达）。
+// linkViewFull 管理端口视图：含物理键与 createdBy（仅 AdminHandler 引擎可达；
+// 管理台是服务端管理面，数字用户 id 按需求4 决策允许）。
 func linkViewFull(l *store.ShareLink) map[string]any {
 	v := linkView(l)
 	v["rootId"] = l.RootID
 	v["path"] = l.Path
+	v["createdBy"] = l.CreatedBy
 	return v
 }
 
@@ -84,39 +89,16 @@ func (s *Server) handleShareCreate(c *gin.Context) {
 		writeErr(c, statusOf(err), err)
 		return
 	}
-	// 过期时间：expiresAt(RFC3339) 优先，其次 expiresInHours
-	var expires *time.Time
-	if req.ExpiresAt != "" {
-		t, terr := time.Parse(time.RFC3339, req.ExpiresAt)
-		if terr != nil {
-			writeErr(c, http.StatusBadRequest, errors.New("expiresAt must be RFC3339"))
-			return
-		}
-		expires = &t
-	} else if req.ExpiresInHours > 0 {
-		t := time.Now().Add(time.Duration(req.ExpiresInHours * float64(time.Hour)))
-		expires = &t
+	// 过期时间+密码策略（与创建端共用助手，0.2.11）
+	expires, eerr := shareResolveExpiry(req.ExpiresAt, req.ExpiresInHours)
+	if eerr != nil {
+		writeErr(c, http.StatusBadRequest, eerr)
+		return
 	}
-	// 密码策略：noPassword → 免密；显式 password → 用之；否则随机生成（默认，需求7）
-	plain := ""
-	hash := ""
-	switch {
-	case req.NoPassword:
-	case req.Password != "":
-		plain = req.Password
-	default:
-		_ = req.AutoPassword // 默认即自动生成（六位字母+数字）
-		plain, err = auth.RandomPassword(6)
-		if err != nil {
-			writeErr(c, http.StatusInternalServerError, err)
-			return
-		}
-	}
-	if plain != "" {
-		if hash, err = bcryptHash(plain); err != nil {
-			writeErr(c, http.StatusInternalServerError, err)
-			return
-		}
+	plain, hash, perr := shareResolvePassword(req.Password, req.NoPassword)
+	if perr != nil {
+		writeErr(c, http.StatusInternalServerError, perr)
+		return
 	}
 	// 链接按物理键存储：匿名 /s/ 访问与管理台直查物理根，不依赖创建者会话
 	link := &store.ShareLink{
@@ -127,10 +109,195 @@ func (s *Server) handleShareCreate(c *gin.Context) {
 		writeErr(c, statusOf(err), err)
 		return
 	}
+	logx.InfoT(traceOf(c), "share: 链接创建 account=%q root=%s path=%q", u.Username, req.RootID, rel)
 	out := linkView(link)
 	out["password"] = plain // 明文密码仅创建时返回一次
 	s.audit(c, store.AuditShareCreate, "", 0, req.RootID, rel, "link "+link.Token)
 	writeJSON(c, http.StatusCreated, out)
+}
+
+// ---------- 创建/更新体的共用解析（用户端口与 0.2.11 管理端口专属端点共用，
+// 纯函数无权限分支——不是"跨端口复用 handler"） ----------
+
+// shareResolveExpiry 过期时间：expiresAt(RFC3339) 优先，其次 expiresInHours。
+func shareResolveExpiry(expiresAt string, hours float64) (*time.Time, error) {
+	if expiresAt != "" {
+		t, terr := time.Parse(time.RFC3339, expiresAt)
+		if terr != nil {
+			return nil, errors.New("expiresAt must be RFC3339")
+		}
+		return &t, nil
+	}
+	if hours > 0 {
+		t := time.Now().Add(time.Duration(hours * float64(time.Hour)))
+		return &t, nil
+	}
+	return nil, nil
+}
+
+// shareResolvePassword 密码策略：noPassword → 免密；显式 password → 用之；
+// 否则随机生成（默认，需求7）。返回（明文[仅创建响应一次], bcrypt 哈希）。
+func shareResolvePassword(password string, noPassword bool) (string, string, error) {
+	plain, hash := "", ""
+	switch {
+	case noPassword:
+	case password != "":
+		plain = password
+	default:
+		p, err := auth.RandomPassword(6)
+		if err != nil {
+			return "", "", err
+		}
+		plain = p
+	}
+	if plain != "" {
+		h, err := bcryptHash(plain)
+		if err != nil {
+			return "", "", err
+		}
+		hash = h
+	}
+	return plain, hash, nil
+}
+
+// shareUpdateBody 更新请求体（两端共用）。
+type shareUpdateBody struct {
+	Password   string          `json:"password"`
+	NoPassword bool            `json:"noPassword"`
+	ExpiresAt  json.RawMessage `json:"expiresAt"`
+	Disabled   *bool           `json:"disabled"`
+}
+
+// apply 就地改 link 字段（不落库）。
+func (b *shareUpdateBody) apply(link *store.ShareLink) error {
+	if b.NoPassword {
+		link.PasswordHash = ""
+	} else if b.Password != "" {
+		h, err := bcryptHash(b.Password)
+		if err != nil {
+			return err
+		}
+		link.PasswordHash = h
+	}
+	if len(b.ExpiresAt) > 0 {
+		if string(b.ExpiresAt) == "null" {
+			link.ExpiresAt = nil
+		} else {
+			var ts string
+			if err := json.Unmarshal(b.ExpiresAt, &ts); err != nil {
+				return errors.New("expiresAt must be RFC3339 string or null")
+			}
+			t, terr := time.Parse(time.RFC3339, ts)
+			if terr != nil {
+				return errors.New("expiresAt must be RFC3339")
+			}
+			link.ExpiresAt = &t
+		}
+	}
+	if b.Disabled != nil {
+		link.Disabled = *b.Disabled
+	}
+	link.HasPassword = link.PasswordHash != ""
+	return nil
+}
+
+// ---------- 0.2.11 管理端口专属分享 CRUD（仅 AdminHandler 引擎注册） ----------
+// 与用户端点语义同源但**独立成面**：物理 (rootId, path) 直传（无 jail 翻译、
+// 无所有权校验——管理员代管全部链接），响应 linkViewFull（含物理键与
+// createdBy——管理台可见）。超管 CreatedBy=0 的链接由 validLink 哨兵跳过
+// 创建者校验（0.2.11 修复，见该函数）。
+
+func (s *Server) handleAdminLinkCreate(c *gin.Context) {
+	var req struct {
+		RootID         string  `json:"rootId"`
+		Path           string  `json:"path"`
+		ExpiresAt      string  `json:"expiresAt"`
+		ExpiresInHours float64 `json:"expiresInHours"`
+		Password       string  `json:"password"`
+		NoPassword     bool    `json:"noPassword"`
+	}
+	if err := decode(c, &req); err != nil || req.RootID == "" {
+		writeErr(c, http.StatusBadRequest, errors.New("rootId + path required"))
+		return
+	}
+	root := s.Roots[req.RootID]
+	if root == nil {
+		writeErr(c, http.StatusBadRequest, fmt.Errorf("unknown root %q", req.RootID))
+		return
+	}
+	sub := fileops.CleanRel(req.Path)
+	abs, err := fileops.JoinRoot(root.Path, sub)
+	if err != nil {
+		writeErr(c, http.StatusBadRequest, err)
+		return
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		writeErr(c, statusOf(err), err)
+		return
+	}
+	expires, eerr := shareResolveExpiry(req.ExpiresAt, req.ExpiresInHours)
+	if eerr != nil {
+		writeErr(c, http.StatusBadRequest, eerr)
+		return
+	}
+	plain, hash, perr := shareResolvePassword(req.Password, req.NoPassword)
+	if perr != nil {
+		writeErr(c, http.StatusInternalServerError, perr)
+		return
+	}
+	u := currentUser(c) // 管理端点必已 requireAdmin
+	link := &store.ShareLink{
+		Token: fileops.RandomHex(12), RootID: req.RootID, Path: sub,
+		IsDir: info.IsDir(), PasswordHash: hash, ExpiresAt: expires, CreatedBy: u.ID,
+	}
+	if err := s.Store.CreateShareLink(link); err != nil {
+		writeErr(c, statusOf(err), err)
+		return
+	}
+	out := linkViewFull(link)
+	out["password"] = plain
+	logx.InfoT(traceOf(c), "admin: 分享链接创建 account=%q root=%s path=%q", u.Username, req.RootID, sub)
+	s.audit(c, store.AuditShareCreate, "", 0, req.RootID, sub, "admin link "+link.Token)
+	writeJSON(c, http.StatusCreated, out)
+}
+
+func (s *Server) handleAdminLinkUpdate(c *gin.Context) {
+	link, err := s.Store.GetShareLinkByToken(c.Param("token"))
+	if err != nil {
+		writeErr(c, statusOf(err), err)
+		return
+	}
+	var req shareUpdateBody
+	if err := decode(c, &req); err != nil {
+		writeErr(c, http.StatusBadRequest, err)
+		return
+	}
+	if err := req.apply(link); err != nil {
+		writeErr(c, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.Store.UpdateShareLink(link); err != nil {
+		writeErr(c, statusOf(err), err)
+		return
+	}
+	s.audit(c, store.AuditShareCreate, "", 0, link.RootID, link.Path, "admin link update "+link.Token)
+	writeJSON(c, http.StatusOK, linkViewFull(link))
+}
+
+func (s *Server) handleAdminLinkDelete(c *gin.Context) {
+	link, err := s.Store.GetShareLinkByToken(c.Param("token"))
+	if err != nil {
+		writeErr(c, statusOf(err), err)
+		return
+	}
+	if err := s.Store.DeleteShareLink(link.ID); err != nil {
+		writeErr(c, statusOf(err), err)
+		return
+	}
+	logx.InfoT(traceOf(c), "admin: 分享链接删除 id=%d root=%s path=%q", link.ID, link.RootID, link.Path)
+	s.audit(c, store.AuditShareDelete, "", 0, link.RootID, link.Path, "admin link delete "+link.Token)
+	writeJSON(c, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleShareList GET /api/v1/share/links → 我创建的链接。
@@ -152,7 +319,9 @@ func (s *Server) handleShareList(c *gin.Context) {
 	writeJSON(c, http.StatusOK, out)
 }
 
-// shareByTokenOwner 取链接并校验属主（管理员可代管）。
+// shareByTokenOwner 取链接并校验属主。0.2.11 端口拆分：本用户端口 handler
+// 不再有"管理员代管"分支（admin/super 会话被 authCtx 拒于用户端口之外），
+// 管理台代管走专属端点 /admin/links/{token}（无所有权校验）。
 func (s *Server) shareByTokenOwner(c *gin.Context) *store.ShareLink {
 	token := c.Param("token")
 	link, err := s.Store.GetShareLinkByToken(token)
@@ -161,7 +330,7 @@ func (s *Server) shareByTokenOwner(c *gin.Context) *store.ShareLink {
 		return nil
 	}
 	u := currentUser(c)
-	if u == nil || (link.CreatedBy != u.ID && u.Role != store.RoleAdmin) {
+	if u == nil || link.CreatedBy != u.ID {
 		writeErr(c, http.StatusForbidden, errors.New("not the owner of this link"))
 		return nil
 	}
@@ -171,52 +340,21 @@ func (s *Server) shareByTokenOwner(c *gin.Context) *store.ShareLink {
 // handleShareUpdate PUT /api/v1/share/links/{token}
 // body: {password?, noPassword?, expiresAt?(RFC3339|null=永久), disabled?}
 // expiresAt 字段缺省=不修改；null=改为永久；字符串=更新有效期。
+// 体解析经共用助手 shareUpdateBody（0.2.11，与管理端专属端点同源语义）。
 func (s *Server) handleShareUpdate(c *gin.Context) {
 	link := s.shareByTokenOwner(c)
 	if link == nil {
 		return
 	}
-	var req struct {
-		Password   string          `json:"password"`
-		NoPassword bool            `json:"noPassword"`
-		ExpiresAt  json.RawMessage `json:"expiresAt"`
-		Disabled   *bool           `json:"disabled"`
-	}
+	var req shareUpdateBody
 	if err := decode(c, &req); err != nil {
 		writeErr(c, http.StatusBadRequest, err)
 		return
 	}
-	if req.NoPassword {
-		link.PasswordHash = ""
-	} else if req.Password != "" {
-		h, err := bcryptHash(req.Password)
-		if err != nil {
-			writeErr(c, http.StatusInternalServerError, err)
-			return
-		}
-		link.PasswordHash = h
+	if err := req.apply(link); err != nil {
+		writeErr(c, http.StatusBadRequest, err)
+		return
 	}
-	if len(req.ExpiresAt) > 0 {
-		if string(req.ExpiresAt) == "null" {
-			link.ExpiresAt = nil
-		} else {
-			var ts string
-			if err := json.Unmarshal(req.ExpiresAt, &ts); err != nil {
-				writeErr(c, http.StatusBadRequest, errors.New("expiresAt must be RFC3339 string or null"))
-				return
-			}
-			t, terr := time.Parse(time.RFC3339, ts)
-			if terr != nil {
-				writeErr(c, http.StatusBadRequest, errors.New("expiresAt must be RFC3339"))
-				return
-			}
-			link.ExpiresAt = &t
-		}
-	}
-	if req.Disabled != nil {
-		link.Disabled = *req.Disabled
-	}
-	link.HasPassword = link.PasswordHash != ""
 	if err := s.Store.UpdateShareLink(link); err != nil {
 		writeErr(c, statusOf(err), err)
 		return
@@ -262,14 +400,19 @@ func (s *Server) validLink(c *gin.Context, token string) *store.ShareLink {
 	}
 	// 创建者失去 share（ACL 收紧），或失去链接目标所在授权基座（分配回收）→ 立即断链。
 	// admin 创建者不受 jail 范围约束（其链接指向物理路径，管理台维护）。
-	creator, err := s.Store.GetUserByID(link.CreatedBy)
-	if err != nil || !s.Perms.For(creator, link.RootID, link.Path).Share {
-		writeErr(c, http.StatusGone, errors.New("share link revoked (creator lost share permission)"))
-		return nil
-	}
-	if creator.Role != store.RoleAdmin && !s.pathInUserScope(creator, link.RootID, link.Path) {
-		writeErr(c, http.StatusGone, errors.New("share link revoked (creator lost access to target)"))
-		return nil
+	// 0.2.11 修复潜在断链：超管创建（CreatedBy=SuperAdminID 哨兵，超管不在库内）
+	// 跳过创建者校验——否则 GetUserByID(0) 必 ErrNotFound、链接恒 410；
+	// 超管/管理台链接的生命周期由管理面（/admin/links）管理，删号级联不涉哨兵。
+	if link.CreatedBy != store.SuperAdminID {
+		creator, err := s.Store.GetUserByID(link.CreatedBy)
+		if err != nil || !s.Perms.For(creator, link.RootID, link.Path).Share {
+			writeErr(c, http.StatusGone, errors.New("share link revoked (creator lost share permission)"))
+			return nil
+		}
+		if creator.Role != store.RoleAdmin && !s.pathInUserScope(creator, link.RootID, link.Path) {
+			writeErr(c, http.StatusGone, errors.New("share link revoked (creator lost access to target)"))
+			return nil
+		}
 	}
 	return link
 }

@@ -53,12 +53,12 @@ func (s *Server) handleRoots(c *gin.Context) {
 		writeErr(c, http.StatusInternalServerError, err)
 		return
 	}
-	// 分配条目的别名优先展示
+	// 分配条目的别名优先展示（键=客户端可见令牌，0.2.11 家目录根经 vrootIDOut 映射）
 	alias := map[string]string{}
 	if u := currentUser(c); u != nil {
 		if urs, err := s.Store.ListUserRoots(u.ID); err == nil {
 			for _, r := range urs {
-				alias[vrootID(r.RootID, fileops.CleanRel(r.SubPath))] = r.Alias
+				alias[vrootIDOut(r.RootID, fileops.CleanRel(r.SubPath))] = r.Alias
 			}
 		}
 	}
@@ -83,11 +83,15 @@ func (s *Server) handleRoots(c *gin.Context) {
 			continue
 		}
 		for _, b := range bases[rid] {
-			name := alias[vrootID(rid, b)]
+			name := alias[vrootIDOut(rid, b)]
 			if name == "" {
-				name = baseName(r, b)
+				if rid == store.HomeRootID {
+					name = homeBaseToken(b) // 遗留行无别名：显示账户名（不泄露用户 id）
+				} else {
+					name = baseName(r, b)
+				}
 			}
-			out = append(out, rootView{ID: vrootID(rid, b), Name: name, Jail: b})
+			out = append(out, rootView{ID: vrootIDOut(rid, b), Name: name, Jail: jailOut(rid, b)})
 		}
 	}
 	writeJSON(c, http.StatusOK, out)

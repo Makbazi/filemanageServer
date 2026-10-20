@@ -8,7 +8,10 @@
 //   - 请求 rootId 形式："physID"（base=""）或 "physID:jail"；存储层键
 //     （ACL/版本/回收站/上传会话/file_meta/分享链接）一律用 (physID, 物理路径)，
 //     客户端只见相对所命中 base 的显示路径。
-//   - 管理端口（adminScope 中间件）按物理根全量工作，base=""，管理台直接维护物理路径。
+//   - 0.2.11 端口彻底拆分：本翻译层只在用户端口运转；管理台维护物理路径经
+//     /api/v1/admin/*（/admin/fs 直读物理根），不再注册业务路由。
+//   - 家目录根 (_users) 基座名含用户 id（user_<账户>_<id>），客户端可见令牌
+//     一律经 vrootIDOut/jailOut 映射为账户名，入方向经 translateHomeJail 还原。
 //   - 降级模式（无元数据库）为 plain 配置根形态（匿名按 D1 仅浏览不可下载）。
 package api
 
@@ -25,7 +28,8 @@ import (
 	store "filemanageServer/internal/store"
 )
 
-// adminModeKey 管理端口标记（仅 AdminHandler 的引擎设置）。
+// adminModeKey 管理端口标记（仅 AdminHandler 的引擎设置；0.2.11 拆分后
+// 供 authCtx 分流与 /api 版本发现的 adminUI 字段，路径翻译层不再读取）。
 const adminModeKey = "fm.adminMode"
 
 // basesKey 请求级授权基座缓存键。
@@ -104,6 +108,66 @@ func vrootID(physID, base string) string {
 	return physID + ":" + base
 }
 
+// ---------- 0.2.11 家目录根的用户 id 遮蔽（基座名 ⇄ 账户名双向映射） ----------
+//
+// 家目录基座名 = user_<账户>_<用户id>（含用户 id，用户端口不得可见）。客户端
+// 可见令牌取账户名（升级前后 "_users:<账户>" 恒字面有效——旧布局基座名即账户
+// 名，存量客户端缓存根 id 不失效）。非新布局名（遗留/异常）原样透传。
+// 出方向统一走 vrootIDOut/displayOf；入方向 scope() 翻译（scopePhys 物理键
+// 回流天然直接命中基座，走透传支）。
+
+// homeSegToken 单个路径段的家目录令牌映射（非新布局名原样返回）。
+func homeSegToken(seg string) string {
+	if acc := fileops.HomeAccountOf(seg); acc != "" {
+		return acc
+	}
+	return seg
+}
+
+// homeBaseToken 家目录基座路径 → 客户端可见令牌路径：**逐段**映射——
+// 分享给他人的家目录子路径（如 user_alice_3/docs）同样遮蔽用户 id，
+// 变为 alice/docs。
+func homeBaseToken(base string) string {
+	segs := strings.Split(base, "/")
+	for i, s := range segs {
+		segs[i] = homeSegToken(s)
+	}
+	return strings.Join(segs, "/")
+}
+
+// vrootIDOut 基座 (physID, base) 的客户端可见虚拟根 id。
+func vrootIDOut(physID, base string) string {
+	if physID == store.HomeRootID {
+		return vrootID(physID, homeBaseToken(base))
+	}
+	return vrootID(physID, base)
+}
+
+// jailOut 基座的客户端可见 jail 字段（handleRoots 输出用）。
+func jailOut(physID, base string) string {
+	if physID == store.HomeRootID {
+		return homeBaseToken(base)
+	}
+	return base
+}
+
+// translateHomeJail 把请求 jail 的账户形令牌翻译为真实基座（逐段映射比对）；
+// 已直接命中任一基座则原样返回（物理键回流 scopePhys 场景）。无匹配则原样
+// 返回、交由既有基座命中检查拒绝（伪造他人目录依旧 403——基座本身即会话私有）。
+func translateHomeJail(jail string, bases []string) string {
+	for _, b := range bases {
+		if hasPathPrefix(jail, b) {
+			return jail
+		}
+	}
+	for _, b := range bases {
+		if homeBaseToken(b) == jail {
+			return b
+		}
+	}
+	return jail
+}
+
 // basesMap 当前主体对每个物理根的授权基座集合（请求级缓存）。
 // 返回 map[physID][]string；根缺席或列表为空 = 无任何访问面。
 func (s *Server) basesMap(c *gin.Context) (map[string][]string, error) {
@@ -122,16 +186,11 @@ type basesCache struct {
 }
 
 func (s *Server) computeBases(c *gin.Context) (map[string][]string, error) {
+	// 0.2.11 端口彻底拆分后，本翻译层只在用户端口运转（管理端点不注册业务
+	// 路由，物理面浏览走 /admin/fs 直读 s.Roots），"管理端口整根基座"分支已删。
 	out := map[string][]string{}
 	for id := range s.Roots {
 		out[id] = []string{}
-	}
-	if c.GetBool(adminModeKey) {
-		// 管理端口：整根即基座（含内部家目录根 _users，管理台可见）
-		for id := range s.Roots {
-			out[id] = []string{""}
-		}
-		return out, nil
 	}
 	if !s.dbReady() {
 		// 降级模式：plain 配置根整根基座；内部家目录根**不暴露**
@@ -283,6 +342,10 @@ func (s *Server) scope(c *gin.Context, rootID, rel string) (*scopeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 0.2.11 家目录根：账户形 jail 令牌翻译为真实基座（用户 id 不出服务端）
+	if physID == store.HomeRootID {
+		jail = translateHomeJail(jail, bases[physID])
+	}
 	// jail 本身必须命中 base（防伪造 "phys:其他用户目录"）
 	baseOK := false
 	for _, b := range bases[physID] {
@@ -326,7 +389,7 @@ func (s *Server) scope(c *gin.Context, rootID, rel string) (*scopeInfo, error) {
 		return nil, err
 	}
 	return &scopeInfo{
-		PhysID: physID, Base: best, VRoot: vrootID(physID, best),
+		PhysID: physID, Base: best, VRoot: vrootIDOut(physID, best),
 		Root: root, BaseAbs: baseAbs, Phys: cand, Disp: disp, Abs: abs,
 	}, nil
 }
@@ -359,7 +422,7 @@ func (s *Server) displayOf(c *gin.Context, physID, physPath string) (string, str
 	}
 	disp := strings.TrimPrefix(physPath, best)
 	disp = strings.TrimPrefix(disp, "/")
-	return vrootID(physID, best), disp, true
+	return vrootIDOut(physID, best), disp, true
 }
 
 // baseName base 的展示名（整根回退根名，否则取路径末段）。
