@@ -187,6 +187,14 @@ func (p *Proxy) UpdateUserNickname(id int64, nickname string) error {
 	return s.UpdateUserNickname(id, nickname)
 }
 
+func (p *Proxy) UpdateUserAuth(id int64, email string, emailVerified bool, mfaMethod, mfaSecret string) error {
+	s := p.Current()
+	if s == nil {
+		return ErrNoDB
+	}
+	return s.UpdateUserAuth(id, email, emailVerified, mfaMethod, mfaSecret)
+}
+
 func (p *Proxy) UpdateUserRole(id int64, role string) error {
 	s := p.Current()
 	if s == nil {
@@ -633,6 +641,14 @@ func (p *Proxy) RenewAuthSession(id int64, expiresAt, lastUsedAt time.Time) erro
 		return ErrNoDB
 	}
 	return s.RenewAuthSession(id, expiresAt, lastUsedAt)
+}
+
+func (p *Proxy) UpdateAuthSessionFlow(id int64, flowData string) error {
+	s := p.Current()
+	if s == nil {
+		return ErrNoDB
+	}
+	return s.UpdateAuthSessionFlow(id, flowData)
 }
 
 func (p *Proxy) DeleteAuthSessionByTokenHash(tokenHash string) error {

@@ -29,7 +29,9 @@ func mysqlDDL() []string {
 			password_hash VARCHAR(100) NOT NULL,
 			role VARCHAR(16) NOT NULL DEFAULT 'user',
 			allowed_roots TEXT NOT NULL,
-			created_at DATETIME(3) NOT NULL)` + mysqlTail,
+			created_at DATETIME(3) NOT NULL,
+			email VARCHAR(320) NOT NULL DEFAULT '', email_verified TINYINT NOT NULL DEFAULT 0,
+			mfa_method VARCHAR(16) NOT NULL DEFAULT '', mfa_secret VARCHAR(64) NOT NULL DEFAULT '')` + mysqlTail,
 		`CREATE TABLE IF NOT EXISTS file_metas (
 			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 			user_id BIGINT NOT NULL, root_id VARCHAR(32) NOT NULL, path VARCHAR(700) NOT NULL,
@@ -116,6 +118,7 @@ func mysqlDDL() []string {
 			username VARCHAR(64) NOT NULL DEFAULT '', role VARCHAR(16) NOT NULL DEFAULT '',
 			super TINYINT NOT NULL DEFAULT 0, gen BIGINT NOT NULL DEFAULT 0,
 			ref VARCHAR(128) NOT NULL DEFAULT '', client_id VARCHAR(64) NOT NULL DEFAULT '',
+			flow_data VARCHAR(1024) NOT NULL DEFAULT '',
 			token_hash VARCHAR(128) NOT NULL UNIQUE,
 			expires_at DATETIME(3) NOT NULL, last_used_at DATETIME(3) NOT NULL,
 			created_at DATETIME(3) NOT NULL,
@@ -124,7 +127,8 @@ func mysqlDDL() []string {
 }
 
 // mysqlEnsureExtra 存量库加列守卫（0.2.4 auth_sessions.client_id、
-// 0.2.11 users.nickname；只增不改，属幂等 DDL 清单的组成部分——MySQL 不支持
+// 0.2.11 users.nickname、0.2.12 auth_sessions.flow_data + users 邮箱/二次验证
+// 四列；只增不改，属幂等 DDL 清单的组成部分——MySQL 不支持
 // ADD COLUMN IF NOT EXISTS，先查 information_schema 再 ALTER）。
 func mysqlEnsureExtra(db *gorm.DB) error {
 	probe := func(table, column, ddl string) error {
@@ -141,8 +145,18 @@ func mysqlEnsureExtra(db *gorm.DB) error {
 		}
 		return nil
 	}
-	if err := probe("auth_sessions", "client_id", "ALTER TABLE auth_sessions ADD COLUMN client_id VARCHAR(64) NOT NULL DEFAULT ''"); err != nil {
-		return err
+	for _, p := range [][3]string{
+		{"auth_sessions", "client_id", "ALTER TABLE auth_sessions ADD COLUMN client_id VARCHAR(64) NOT NULL DEFAULT ''"},
+		{"users", "nickname", "ALTER TABLE users ADD COLUMN nickname VARCHAR(128) NOT NULL DEFAULT ''"},
+		{"auth_sessions", "flow_data", "ALTER TABLE auth_sessions ADD COLUMN flow_data VARCHAR(1024) NOT NULL DEFAULT ''"},
+		{"users", "email", "ALTER TABLE users ADD COLUMN email VARCHAR(320) NOT NULL DEFAULT ''"},
+		{"users", "email_verified", "ALTER TABLE users ADD COLUMN email_verified TINYINT NOT NULL DEFAULT 0"},
+		{"users", "mfa_method", "ALTER TABLE users ADD COLUMN mfa_method VARCHAR(16) NOT NULL DEFAULT ''"},
+		{"users", "mfa_secret", "ALTER TABLE users ADD COLUMN mfa_secret VARCHAR(64) NOT NULL DEFAULT ''"},
+	} {
+		if err := probe(p[0], p[1], p[2]); err != nil {
+			return err
+		}
 	}
-	return probe("users", "nickname", "ALTER TABLE users ADD COLUMN nickname VARCHAR(128) NOT NULL DEFAULT ''")
+	return nil
 }

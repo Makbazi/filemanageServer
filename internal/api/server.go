@@ -51,6 +51,12 @@ type Server struct {
 	// Auth 三层认证中心（0.2.3，替代 JWT）：不透明随机凭证，身份存服务端认证图。
 	Auth *auth.Center
 
+	// 0.2.12 OIDC id_token 签名密钥（<dataDir>/oidc.key，首用惰性加载/生成）——
+	// 仅用于 id_token 声明回执的 HS256 签名；不参与任何鉴权路径。
+	oidcKeyOnce sync.Once
+	oidcKeyVal  []byte
+	oidcKeyErr  error
+
 	// 0.1.1 维护暂停（需求：切换/迁移/导出前后数据一致性）：
 	// manualPause = 管理台"暂停客户端"开关；autoPause = connect(含迁移)/export
 	// 复制窗口内自动屏障（defer 释放）。任一置位 → 用户端口与业务管理组 503，
@@ -101,6 +107,21 @@ func NewServer(cfg *config.Config, st store.Store, proxy *store.Proxy, cch cache
 		ID: store.HomeRootID, Name: store.HomeRootName, Path: cfg.UsersDir(),
 	}
 	return s, nil
+}
+
+// oidcKey 惰性加载/生成 id_token 签名密钥（0.2.12；失败可重试——Once 只
+// 吞首败：用指针语义保持"每次失败都重算"会引入竞态，这里保持单次结果，
+// 密钥文件问题属部署故障，进程内一致失败是可接受形态，日志侧由调用方报错）。
+func (s *Server) oidcKey() ([]byte, error) {
+	s.oidcKeyOnce.Do(func() {
+		s.oidcKeyVal, s.oidcKeyErr = auth.LoadOrCreateOidcKey(s.Cfg.OIDCKeyFile())
+		if s.oidcKeyErr != nil {
+			// 请求路径惰性加载：记 ERROR 并让 id_token 构建失败降级（token 仍发——
+			// id_token 只是声明回执不参与鉴权）；绝不在服务中 Fatal 退出进程。
+			logx.Error("oidc: 签名密钥不可用（id_token 将不下发）: %v", s.oidcKeyErr)
+		}
+	})
+	return s.oidcKeyVal, s.oidcKeyErr
 }
 
 // ---------- 主体（登录用户 / 匿名访客） ----------

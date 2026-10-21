@@ -18,7 +18,9 @@ func sqliteDDL() []string {
 			password_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'user',
 			allowed_roots TEXT NOT NULL DEFAULT '[]',
-			created_at DATETIME NOT NULL)`,
+			created_at DATETIME NOT NULL,
+			email TEXT NOT NULL DEFAULT '', email_verified INTEGER NOT NULL DEFAULT 0,
+			mfa_method TEXT NOT NULL DEFAULT '', mfa_secret TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS file_metas (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL, root_id TEXT NOT NULL, path TEXT NOT NULL,
@@ -105,6 +107,7 @@ func sqliteDDL() []string {
 			username TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '',
 			super INTEGER NOT NULL DEFAULT 0, gen INTEGER NOT NULL DEFAULT 0,
 			ref TEXT NOT NULL DEFAULT '', client_id TEXT NOT NULL DEFAULT '',
+			flow_data TEXT NOT NULL DEFAULT '',
 			token_hash TEXT NOT NULL UNIQUE,
 			expires_at DATETIME NOT NULL, last_used_at DATETIME NOT NULL,
 			created_at DATETIME NOT NULL)`,
@@ -113,30 +116,35 @@ func sqliteDDL() []string {
 }
 
 // sqliteEnsureExtra 存量库加列守卫（0.2.4 auth_sessions.client_id、
-// 0.2.11 users.nickname；只增不改，属幂等 DDL 清单的组成部分——sqlite 无
-// ADD COLUMN IF NOT EXISTS，先查 pragma_table_info 再 ALTER；既有列/表绝不
-// 触碰，磁盘字节兼容不受影响）。
+// 0.2.11 users.nickname、0.2.12 auth_sessions.flow_data + users 邮箱/二次验证
+// 四列；只增不改，属幂等 DDL 清单的组成部分——sqlite 无 ADD COLUMN IF NOT
+// EXISTS，先查 pragma_table_info 再 ALTER；既有列/表绝不触碰，磁盘字节兼容
+// 不受影响）。
 func sqliteEnsureExtra(db *gorm.DB) error {
-	var cnt int64
-	err := db.Raw("SELECT COUNT(*) FROM pragma_table_info('auth_sessions') WHERE name = 'client_id'").
-		Scan(&cnt).Error
-	if err != nil {
-		return fmt.Errorf("migrate: probe client_id: %w", err)
-	}
-	if cnt == 0 {
-		if err := db.Exec("ALTER TABLE auth_sessions ADD COLUMN client_id TEXT NOT NULL DEFAULT ''").Error; err != nil {
-			return fmt.Errorf("migrate: add client_id: %w", err)
+	probe := func(table, column, ddl string) error {
+		var cnt int64
+		if err := db.Raw("SELECT COUNT(*) FROM pragma_table_info('"+table+"') WHERE name = ?", column).
+			Scan(&cnt).Error; err != nil {
+			return fmt.Errorf("migrate: probe %s.%s: %w", table, column, err)
 		}
+		if cnt == 0 {
+			if err := db.Exec(ddl).Error; err != nil {
+				return fmt.Errorf("migrate: add %s.%s: %w", table, column, err)
+			}
+		}
+		return nil
 	}
-	cnt = 0
-	err = db.Raw("SELECT COUNT(*) FROM pragma_table_info('users') WHERE name = 'nickname'").
-		Scan(&cnt).Error
-	if err != nil {
-		return fmt.Errorf("migrate: probe users.nickname: %w", err)
-	}
-	if cnt == 0 {
-		if err := db.Exec("ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT ''").Error; err != nil {
-			return fmt.Errorf("migrate: add users.nickname: %w", err)
+	for _, p := range [][3]string{
+		{"auth_sessions", "client_id", "ALTER TABLE auth_sessions ADD COLUMN client_id TEXT NOT NULL DEFAULT ''"},
+		{"users", "nickname", "ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT ''"},
+		{"auth_sessions", "flow_data", "ALTER TABLE auth_sessions ADD COLUMN flow_data TEXT NOT NULL DEFAULT ''"},
+		{"users", "email", "ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''"},
+		{"users", "email_verified", "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0"},
+		{"users", "mfa_method", "ALTER TABLE users ADD COLUMN mfa_method TEXT NOT NULL DEFAULT ''"},
+		{"users", "mfa_secret", "ALTER TABLE users ADD COLUMN mfa_secret TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := probe(p[0], p[1], p[2]); err != nil {
+			return err
 		}
 	}
 	return nil

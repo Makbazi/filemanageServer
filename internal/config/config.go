@@ -51,6 +51,46 @@ type SessionCfg struct {
 	AccessTTL   string `json:"accessTTL"`
 	IdleDays    int    `json:"idleDays"`
 	IdleMinutes int    `json:"idleMinutes"`
+	// RefreshDays（0.2.12）：OAuth 刷新令牌绝对有效期（默认 30 天）。
+	// 刷新即换发（rotation）——每次刷新产出全新 30 天窗口；闲置超窗需重新
+	// 走授权码登录（浏览器登录态在有效期内可静默完成）。
+	RefreshDays int `json:"refreshDays"`
+	// LoginTTL（0.2.12）：授权页浏览器登录态（fm_browser Cookie）绝对有效期
+	// （默认 "12h"）——期内再次发起授权静默放行（prompt=login 可强制重输）。
+	// 与用户会话滑动窗口/刷新令牌各自独立。
+	LoginTTL string `json:"loginTTL"`
+}
+
+// MailCfg 出站邮件（0.2.12 邮箱验证码二步验证；**非必须配置**——Host 留空
+// =未配置，邮箱绑定/邮箱验证码端点回明确中文错误，TOTP 通道不受影响）。
+// 口令只进内存与请求（net/smtp AUTH），绝不入日志（logx 敏感纪律沿用）。
+type MailCfg struct {
+	Host     string `json:"host"`     // SMTP 服务器（空=未配置）
+	Port     int    `json:"port"`     // 0→默认 465(SSL)=true?587：见 SSL 字段
+	SSL      bool   `json:"ssl"`      // true=隐式 TLS(通常 465)；false=STARTTLS(通常 587/25)
+	Username string `json:"username"` // 登录名（空=匿名不认证）
+	Password string `json:"password"` // 登录口令（敏感——绝不出 API/日志）
+	From     string `json:"from"`     // 发件人地址（空=Username）
+	FromName string `json:"fromName"` // 发件人显示名（可选）
+}
+
+// Enabled 判定邮箱通道可用（Host+From 齐备）。
+func (m MailCfg) Enabled() bool { return strings.TrimSpace(m.Host) != "" }
+
+// OAuthClient 一个已注册的 OAuth2 公共客户端（授权码流+PKCE，无密钥——
+// 桌面/移动都是"公开客户端"，安全性由 PKCE + loopback/自定义 scheme 回调保证）。
+type OAuthClient struct {
+	ID            string   `json:"id"`            // client_id（如 desktop/mobile/web）
+	Name          string   `json:"name"`          // 登录页展示名
+	RedirectUris  []string `json:"redirectUris"`  // 精确回调 URI 白名单
+	AllowLoopback bool     `json:"allowLoopback"` // 允许 http://127.0.0.1|localhost:任意端口/回调（RFC 8252 §7.3）
+}
+
+// OAuthCfg OAuth2/OIDC 面（0.2.12）。Issuer 留空=按请求 Host 自动派生
+// （scheme 按 tls.enabled；单主机部署零配置可用，多域名部署显式固定）。
+type OAuthCfg struct {
+	Issuer  string        `json:"issuer"`
+	Clients []OAuthClient `json:"clients"`
 }
 
 // AuthCfg 三层认证图容量与节奏（0.2.3，替代 JWT 方案；见 internal/auth/center.go）：
@@ -195,7 +235,9 @@ type Config struct {
 	TLS       TLSCfg       `json:"tls"`
 	Session   SessionCfg   `json:"session"`
 	Auth      AuthCfg      `json:"auth"` // 三层认证图（0.2.3）
-	Log       LogConf      `json:"log"`  // 服务端日志（0.2.7：等级/目录/轮转上限）
+	Mail      MailCfg      `json:"mail"` // 出站邮件（0.2.12 邮箱验证码；非必须）
+	OAuth     OAuthCfg     `json:"oauth"`
+	Log       LogConf      `json:"log"` // 服务端日志（0.2.7：等级/目录/轮转上限）
 	Anonymous AnonymousCfg `json:"anonymous"`
 	RateLimit RateLimitCfg `json:"rateLimit"`
 	Versions  VersionsCfg  `json:"versions"`
@@ -215,7 +257,7 @@ func DefaultConfig() *Config {
 		DataDir:            "./data",
 		TrashRetentionDays: 30,
 		MaxUploadBytes:     0, // 0.2.8：默认不限（超限 413 仅对显式配置生效）
-		Session:            SessionCfg{AccessTTL: "1h", IdleDays: 21, IdleMinutes: 60},
+		Session:            SessionCfg{AccessTTL: "1h", IdleDays: 21, IdleMinutes: 60, RefreshDays: 30, LoginTTL: "12h"},
 		Auth:               AuthCfg{MemMaxEntries: 200000, MemTTL: "5m", RedisMaxEntries: 5000000, SweepInterval: "10m", TouchWriteEvery: "10m"},
 		Log:                LogConf{Level: "warn", MaxMB: 10, MaxFiles: 3}, // Dir 留空=<dataDir>/logs（finalize/LogDir 派生）
 		Anonymous:          AnonymousCfg{Enabled: true},
@@ -370,6 +412,54 @@ func finalize(c *Config) (*Config, error) {
 	if c.Session.IdleMinutes <= 0 {
 		c.Session.IdleMinutes = 60 // 0.2.4：用户会话滑动闲置窗口默认 1h（需求22 微调）
 	}
+	if c.Session.RefreshDays <= 0 {
+		c.Session.RefreshDays = 30 // 0.2.12：刷新令牌绝对 30 天（刷新即换发新窗口）
+	}
+	if c.Session.LoginTTL == "" {
+		c.Session.LoginTTL = "12h" // 0.2.12：授权页浏览器登录态绝对 12h
+	}
+	// 0.2.12 OAuth：默认客户端注册表（维护者显式配置 oauth.clients 时以其为准，
+	// 缺省覆盖桌面（loopback 回调）/移动（自定义 scheme）两类公共客户端）。
+	if len(c.OAuth.Clients) == 0 {
+		c.OAuth.Clients = []OAuthClient{
+			{ID: "desktop", Name: "桌面客户端", AllowLoopback: true,
+				RedirectUris: []string{"fmmanage://oauth/callback", "http://127.0.0.1", "http://localhost"}},
+			{ID: "mobile", Name: "移动端", AllowLoopback: true,
+				RedirectUris: []string{"filemanageauth://callback"}},
+			{ID: "web", Name: "网页登录", AllowLoopback: true, RedirectUris: []string{}},
+		}
+	}
+	seenOC := map[string]bool{}
+	for i := range c.OAuth.Clients {
+		cl := &c.OAuth.Clients[i]
+		if cl.ID == "" || strings.HasPrefix(cl.ID, "_") || seenOC[cl.ID] {
+			return nil, fmt.Errorf("config: oauth.clients 条目 id %q 非法或重复（非空、不以 '_' 开头、互不重复）", cl.ID)
+		}
+		seenOC[cl.ID] = true
+		if cl.Name == "" {
+			cl.Name = cl.ID
+		}
+		for j := range cl.RedirectUris {
+			cl.RedirectUris[j] = strings.TrimSpace(cl.RedirectUris[j])
+		}
+	}
+	// 邮箱（0.2.12，非必须）：Host 空=未配置（邮箱验证码通道不可用，端点回
+	// 明确错误）；显式配置时 port 默认（SSL=465/STARTTLS=587）、from 回退 username。
+	if c.Mail.Enabled() {
+		if c.Mail.Port <= 0 {
+			if c.Mail.SSL {
+				c.Mail.Port = 465
+			} else {
+				c.Mail.Port = 587
+			}
+		}
+		if c.Mail.From == "" {
+			c.Mail.From = c.Mail.Username
+		}
+		if c.Mail.From == "" {
+			return nil, fmt.Errorf("config: mail.from（或 mail.username）在配置了 mail.host 时必填")
+		}
+	}
 	// 三层认证图默认（0.2.3）
 	if c.Auth.MemMaxEntries <= 0 {
 		c.Auth.MemMaxEntries = 200000
@@ -487,6 +577,38 @@ func (c *Config) LogDir() string {
 // 与 jwt.secret 同理属运行数据：多实例共享部署需放共享卷或逐节点保持一致。
 func (c *Config) AdminAccountFile() string { return filepath.Join(c.DataDir, "admin-account.json") }
 
+// OIDCKeyFile OIDC id_token 签名密钥文件（0.2.12）：<dataDir>/oidc.key（0600，
+// 64-hex 随机；首用自动生成）。形态对齐 admin-account.json/jwt.secret——多实例
+// 共享 dataDir 即共享密钥；属运行数据，列入共享清单。
+func (c *Config) OIDCKeyFile() string { return filepath.Join(c.DataDir, "oidc.key") }
+
+// LoginDuration 授权页浏览器登录态绝对有效期（0.2.12；非法值回落 12h）。
+func (c *Config) LoginDuration() time.Duration {
+	d, err := time.ParseDuration(c.Session.LoginTTL)
+	if err != nil || d <= 0 {
+		return 12 * time.Hour
+	}
+	return d
+}
+
+// RefreshDuration OAuth 刷新令牌绝对有效期（0.2.12；非法值回落 30 天）。
+func (c *Config) RefreshDuration() time.Duration {
+	if c.Session.RefreshDays <= 0 {
+		return 30 * 24 * time.Hour
+	}
+	return time.Duration(c.Session.RefreshDays) * 24 * time.Hour
+}
+
+// OAuthClientOf 查已注册客户端（未注册返回 nil——授权请求一律拒绝）。
+func (c *Config) OAuthClientOf(id string) *OAuthClient {
+	for i := range c.OAuth.Clients {
+		if c.OAuth.Clients[i].ID == id {
+			return &c.OAuth.Clients[i]
+		}
+	}
+	return nil
+}
+
 // AdminAllows 判定管理端口是否放行该来源 IP（0.1.0 需求38；调用方必须传
 // RemoteAddr 解析出的地址，绝不接受 X-Forwarded-For）。lan 分支与用户端口
 // lanFilter 的 isLANIP 判定逐字一致。
@@ -599,12 +721,14 @@ func WriteExample(path string) error {
 		"trashDir":           "./data/trash",
 		"uploadStagingDir":   "./data/staging",
 		"trashRetentionDays": 30,
-		"maxUploadBytes":     0, // 单次上传大小硬上限（字节，0=不限）；0.2.8 起默认不限，需要限额填正数
+		"maxUploadBytes":     0,                                                  // 单次上传大小硬上限（字节，0=不限）；0.2.8 起默认不限，需要限额填正数
 		"adminAccess":        map[string]any{"mode": "local", "ips": []string{}}, // 管理界面 IP 准入（需求38）：local 仅本机 / lan 局域网 / any 任何来源 / custom 指定 ips（IP 或 CIDR 列表）
 		"adminPassword":      "",                                                 // 超管口令重置触发器（0.1.0 需求32）：填入明文→启动时写入超管账户文件并提示清空；平时留空
 		"ai":                 map[string]any{"provider": "none", "baseUrl": "", "apiKey": "", "model": "", "maxFileMB": 20},
 		"tls":                map[string]any{"enabled": false, "certFile": "", "keyFile": "", "autoSelfSign": true},
-		"session":            map[string]any{"accessTTL": "1h", "idleDays": 21},
+		"session":            map[string]any{"accessTTL": "1h", "idleDays": 21, "idleMinutes": 60, "refreshDays": 30, "loginTTL": "12h"},                            // refreshDays=OAuth 刷新令牌绝对天数（0.2.12；刷新即换发新窗口）；loginTTL=授权页浏览器登录态绝对期（期内再次授权静默放行）
+		"mail":               map[string]any{"host": "", "port": 0, "ssl": true, "username": "", "password": "", "from": "", "fromName": ""},                        // 出站邮件（0.2.12 邮箱验证码二步验证；非必须——host 留空=该通道关闭，TOTP 不受影响；口令绝不入日志）
+		"oauth":              map[string]any{"issuer": "", "clients": []map[string]any{}},                                                                           // OAuth2/OIDC（0.2.12）：issuer 空=按请求 Host 自动派生；clients 空=内置 desktop(loopback 回调)/mobile(filemanageauth://callback)/web 三类公共客户端注册表
 		"auth":               map[string]any{"memMaxEntries": 200000, "memTTL": "5m", "redisMaxEntries": 5000000, "sweepInterval": "10m", "touchWriteEvery": "10m"}, // 三层认证图（0.2.3）：进程内 LRU 上限/新鲜期、redis 上限、清扫周期、续期写回间隔
 		"log":                map[string]any{"level": "warn", "dir": "", "maxMB": 10, "maxFiles": 3},                                                                // 服务端日志（0.2.7；0.2.11 六级）：等级 trace|debug|info|warn|error|fatal（默认 warn）；dir 空=<dataDir>/logs；含当前文件在内最多 maxFiles 个、单文件 ≤maxMB MB 按大小轮转；敏感值（口令/令牌/请求体/Authorization）永不入日志
 		"anonymous":          map[string]any{"enabled": true},

@@ -11,11 +11,12 @@ import (
 // CurrentSchema 当前配置 schema 版本。
 // 每次配置结构发生不兼容变化时 +1，并在下方追加对应迁移函数（需求25：
 // 服务端安全升级——旧配置文件自动迁移、原文件备份、未知字段保留）。
-const CurrentSchema = 12
+const CurrentSchema = 13
 
-// MigrateMap 对通用 map 形式的配置执行迁移链 v1→…→v11→v12，返回是否发生变化。
+// MigrateMap 对通用 map 形式的配置执行迁移链 v1→…→v12→v13，返回是否发生变化。
 // 缺失 schemaVersion 的旧配置视为 v1（v1–v7 为基线前内部迭代、从未发布；
-// v8 自 0.1.0 起、v9 自 0.2.3 起、v10 自 0.2.4 起、v11 自 0.2.7 起、v12 自 0.2.8 起）。
+// v8 自 0.1.0 起、v9 自 0.2.3 起、v10 自 0.2.4 起、v11 自 0.2.7 起、v12 自 0.2.8 起、
+// v13 自 0.2.12 起）。
 func MigrateMap(m map[string]any) (bool, error) {
 	ver := 1
 	if v, ok := m["schemaVersion"].(float64); ok && v > 0 {
@@ -60,6 +61,9 @@ func MigrateMap(m map[string]any) (bool, error) {
 		case 11:
 			changed = migrate11to12(m) || changed
 			ver = 12
+		case 12:
+			changed = migrate12to13(m) || changed
+			ver = 13
 		default:
 			return changed, fmt.Errorf("no migration path from schemaVersion %d", ver)
 		}
@@ -242,6 +246,7 @@ func migrate10to11(m map[string]any) bool {
 //     不丢任何用户自定义限额；
 //   - 键缺失 → 直接补 0（新默认，不限）；
 //   - 其余取值一律原样保留（用户显式配置的限额继续生效，超限仍 413）。
+//
 // 需要重新收紧的部署：显式写回正数限额即可（整文件通道与分片会话创建同判）。
 func migrate11to12(m map[string]any) bool {
 	v, ok := m["maxUploadBytes"]
@@ -254,6 +259,41 @@ func migrate11to12(m map[string]any) bool {
 		return true
 	}
 	return false
+}
+
+// migrate12to13 v12（0.2.8–0.2.11）→ v13（0.2.12 认证批）：新增 mail/oauth 两段
+// 与 session.refreshDays 键（OAuth2 授权码+PKCE、二次验证、邮箱通道——全部
+// 非必须配置：mail.host 空=邮箱验证码通道关闭；oauth.clients 空=finalize 落
+// 内置注册表；refreshDays 缺=30 天）。只补缺不覆盖（需求25），存量配置零行为
+// 变化——旧客户端继续走 POST /auth/login（保留端点），不碰新面。
+func migrate12to13(m map[string]any) bool {
+	changed := false
+	if sess, ok := m["session"].(map[string]any); ok {
+		ch := false
+		if _, has := sess["refreshDays"]; !has {
+			sess["refreshDays"] = float64(30)
+			ch = true
+		}
+		if _, has := sess["loginTTL"]; !has {
+			sess["loginTTL"] = "12h"
+			ch = true
+		}
+		changed = changed || ch
+	} else {
+		m["session"] = map[string]any{"accessTTL": "1h", "idleMinutes": float64(60),
+			"refreshDays": float64(30), "loginTTL": "12h"}
+		changed = true
+	}
+	if _, ok := m["mail"]; !ok {
+		m["mail"] = map[string]any{"host": "", "port": float64(0), "ssl": true,
+			"username": "", "password": "", "from": "", "fromName": ""}
+		changed = true
+	}
+	if _, ok := m["oauth"]; !ok {
+		m["oauth"] = map[string]any{"issuer": "", "clients": []any{}}
+		changed = true
+	}
+	return changed
 }
 
 // LoadBalancerConfig 加载 balancer 模式配置：不要求 roots，不物化 secret 文件

@@ -35,6 +35,11 @@ type userRow struct {
 	Role         string    `gorm:"column:role"`
 	AllowedRoots string    `gorm:"column:allowed_roots"` // JSON 文本
 	CreatedAt    time.Time `gorm:"column:created_at"`
+	// 0.2.12 认证批加列（只增不改；四方言 CREATE+extra 幂等加列、file JSON 加性）
+	Email         string `gorm:"column:email"`
+	EmailVerified int64  `gorm:"column:email_verified"` // b2i/i2b
+	MfaMethod     string `gorm:"column:mfa_method"`
+	MfaSecret     string `gorm:"column:mfa_secret"`
 }
 
 func (userRow) TableName() string { return "users" }
@@ -42,7 +47,8 @@ func (userRow) TableName() string { return "users" }
 func (r userRow) fromUser(u *User) userRow {
 	b, _ := json.Marshal(u.AllowedRoots)
 	return userRow{ID: u.ID, Username: u.Username, Nickname: u.Nickname, PasswordHash: u.PasswordHash,
-		Role: u.Role, AllowedRoots: string(b), CreatedAt: u.CreatedAt}
+		Role: u.Role, AllowedRoots: string(b), CreatedAt: u.CreatedAt,
+		Email: u.Email, EmailVerified: b2i(u.EmailVerified), MfaMethod: u.MfaMethod, MfaSecret: u.MfaSecret}
 }
 
 func (r userRow) toUser() *User {
@@ -50,6 +56,8 @@ func (r userRow) toUser() *User {
 	_ = json.Unmarshal([]byte(r.AllowedRoots), &u.AllowedRoots)
 	u.ID, u.Username, u.Nickname, u.PasswordHash, u.Role, u.CreatedAt =
 		r.ID, r.Username, r.Nickname, r.PasswordHash, r.Role, r.CreatedAt
+	u.Email, u.EmailVerified, u.MfaMethod, u.MfaSecret =
+		r.Email, i2b(r.EmailVerified), r.MfaMethod, r.MfaSecret
 	return &u
 }
 
@@ -324,6 +332,7 @@ type authSessionRow struct {
 	ExpiresAt  time.Time `gorm:"column:expires_at"`
 	LastUsedAt time.Time `gorm:"column:last_used_at"`
 	CreatedAt  time.Time `gorm:"column:created_at"`
+	FlowData   string    `gorm:"column:flow_data"` // 0.2.12：OAuth 流程态 JSON（flow/code/device 等 kind；绝不含明文凭证）
 }
 
 func (authSessionRow) TableName() string { return "auth_sessions" }
@@ -331,13 +340,15 @@ func (authSessionRow) TableName() string { return "auth_sessions" }
 func (r authSessionRow) fromAuthSession(a *AuthSession) authSessionRow {
 	return authSessionRow{ID: a.ID, Kind: a.Kind, UserID: a.UserID, Username: a.Username,
 		Role: a.Role, Super: b2i(a.Super), Gen: a.Gen, Ref: a.Ref, ClientID: a.ClientID,
-		TokenHash: a.TokenHash, ExpiresAt: a.ExpiresAt, LastUsedAt: a.LastUsedAt, CreatedAt: a.CreatedAt}
+		TokenHash: a.TokenHash, ExpiresAt: a.ExpiresAt, LastUsedAt: a.LastUsedAt, CreatedAt: a.CreatedAt,
+		FlowData: a.FlowData}
 }
 
 func (r authSessionRow) to() *AuthSession {
 	return &AuthSession{ID: r.ID, Kind: r.Kind, UserID: r.UserID, Username: r.Username,
 		Role: r.Role, Super: i2b(r.Super), Gen: r.Gen, Ref: r.Ref, ClientID: r.ClientID,
-		TokenHash: r.TokenHash, ExpiresAt: r.ExpiresAt, LastUsedAt: r.LastUsedAt, CreatedAt: r.CreatedAt}
+		TokenHash: r.TokenHash, ExpiresAt: r.ExpiresAt, LastUsedAt: r.LastUsedAt, CreatedAt: r.CreatedAt,
+		FlowData: r.FlowData}
 }
 
 // ---------- upload_sessions ----------

@@ -82,6 +82,17 @@ func (s *Server) authCtx() gin.HandlerFunc {
 		h := c.Request.Header.Get("Authorization")
 		ts, ok := strings.CutPrefix(h, "Bearer ")
 		if !ok || ts == "" {
+			// 0.2.12 管理台 BFF：管理端口无 Authorization 头时回退读取
+			// fm_admin HttpOnly Cookie（SameSite=Strict 登录态；写操作另有
+			// adminCsrf 头核对）。用户端口**绝不**读该 Cookie——端口隔离
+			// 由 adminModeKey 判据守住（管理员/超管凭证在用户口依旧 403）。
+			if c.GetBool(adminModeKey) {
+				if v, err := c.Request.Cookie(adminCookie); err == nil && v.Value != "" {
+					ts, ok = v.Value, true
+				}
+			}
+		}
+		if !ok || ts == "" {
 			c.Next()
 			return
 		}
@@ -162,6 +173,27 @@ func (s *Server) authCtx() gin.HandlerFunc {
 		// trace 级细节（六级新增形态：生产默认关闭，排障时 config log.level=trace）
 		logx.TraceT(traceOf(c), "auth: 身份解析成功 account=%q uid=%d adminPort=%v",
 			e.Username, e.UserID, c.GetBool(adminModeKey))
+		c.Next()
+	}
+}
+
+// adminCsrf 0.2.12 管理台 BFF 的 CSRF 屏障：管理端口上一切非安全方法
+// （POST/PUT/DELETE，OPTIONS 预检除外）必须携带 `X-FM-CSRF: 1` 头——浏览器
+// 跨站表单无法自定义头，配合 fm_admin Cookie 的 SameSite=Strict 双保险。
+// 纯 Authorization 头调用（无 Cookie 形态的脚本/程序化管理）同样带头即可，
+// 不区分凭证形态、规则单一。
+func adminCsrf() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		switch c.Request.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			c.Next()
+			return
+		}
+		if c.Request.Header.Get("X-FM-CSRF") != "1" {
+			writeErr(c, http.StatusForbidden, errors.New("缺少 X-FM-CSRF 头（管理台 BFF CSRF 屏障）"))
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }
@@ -311,7 +343,8 @@ func sanitizeLogTarget(u *url.URL) string {
 	if err != nil {
 		return path + "?<unparsed>"
 	}
-	for _, k := range []string{"st", "token", "shareToken", "password", "pass", "pwd"} {
+	for _, k := range []string{"st", "token", "shareToken", "password", "pass", "pwd",
+		"code", "device_code", "refresh_token", "code_verifier", "user_code", "access_token"} {
 		if _, ok := q[k]; ok {
 			q[k] = []string{"**"}
 		}

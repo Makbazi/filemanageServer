@@ -34,7 +34,11 @@ func (s *Server) Handler() *gin.Engine {
 // /api 版本发现的 adminUI 字段（路径翻译层不再读取）。
 // 网络准入走 adminIPFilter（0.1.0 需求38 adminAccess，替代该引擎上的 lanOnly 判定）。
 func (s *Server) AdminHandler() *gin.Engine {
-	e := s.newEngine(s.adminIPFilter(), s.adminScope())
+	// 0.2.12 管理台 BFF（Cookie Session）：登录成功下发 HttpOnly fm_admin Cookie
+	// （SameSite=Strict；adminIPFilter 网络准入+独立端口是第一道墙）；authCtx
+	// 无 Authorization 头时回退读该 Cookie；全端口非 GET 请求必须带
+	// X-FM-CSRF: 1（adminCsrf）——浏览器跨站表单自定义不了头，双保险防 CSRF。
+	e := s.newEngine(s.adminIPFilter(), s.adminScope(), adminCsrf())
 	// 0.2.11 管理台专属登录：裸组（无 requireDB/authCtx/maintenanceGate）——
 	// 与 /admin/db 配置面同理由：超管无库必须可登、维护暂停期操作员绝不被锁死
 	// （修正旧版"暂停期管理台登录 503"与 middleware.go 文档不符的问题）。
@@ -46,6 +50,8 @@ func (s *Server) AdminHandler() *gin.Engine {
 	// requireDB 之外（两者零 Store 依赖或 proxy 安全）；其余管理 API 仍需元数据库。
 	lite := e.Group("/api/v1/admin", s.authCtx(), s.requireAdmin())
 	lite.GET("/info", s.handleAdminInfo)
+	// 0.2.12 BFF 登出：清 fm_admin Cookie + 撤销当前凭证（幂等 200）
+	lite.POST("/logout", s.handleAdminLogout)
 	// 需求33：超管账户页进一步收紧为仅超管本人（DB 管理员不可触达）
 	lite.GET("/super", s.requireSuperAdmin(), s.handleAdminGetSuper)
 	lite.PUT("/super", s.requireSuperAdmin(), s.handleAdminPutSuper)
@@ -124,9 +130,27 @@ func (s *Server) registerV1(e *gin.Engine) {
 	// 0.1.0 需求32/33：login 摘掉路由级 requireDB——超管账户文件不依赖数据库，
 	// 降级模式管理台必须能登录；普通账户在 handler 内判无库 → 503（errNoDB）。
 	// 引导注册端点随文件超管模型移除（管理员由超管在管理台创建，需求33）。
+	// 0.2.12：本端点**保留**作旧客户端兼容直登（维护者决策）；已启用二次
+	// 验证的账户在此一律 403（见 handleLogin）。新客户端走下方 OAuth 面。
 	v1.POST("/auth/login", s.handleLogin)
 	// 0.2.4：/auth/refresh 移除——滑动续期由 authCtx→Touch 服务端无感完成，
 	// 凭证只在重新登录时更换（旧客户端 refresh 退化=401 重登，兼容矩阵已明示）。
+
+	// ---- 0.2.12 OAuth2/OIDC（公开组；协议态全部落认证图三层，多实例互认）----
+	// 授权码+PKCE（桌面/移动经系统浏览器）、设备授权码（RFC 8628）、刷新换发、
+	// 撤销、userinfo、发现文档。登录页内嵌 HTML；二验（TOTP/邮箱验证码）在
+	// 页面闭环。dbReady 判定在 handler 内（对齐 handleLogin 模式）。
+	oauth := v1.Group("/oauth")
+	oauth.GET("/authorize", s.handleOAuthAuthorize)
+	oauth.POST("/login", s.handleOAuthLogin)
+	oauth.POST("/mfa", s.handleOAuthMfa)
+	oauth.POST("/token", s.handleOAuthToken)
+	oauth.POST("/revoke", s.handleOAuthRevoke)
+	oauth.POST("/device", s.handleOAuthDevice)
+	oauth.GET("/device/input", s.handleOAuthDeviceInput)
+	oauth.POST("/device/verify", s.handleOAuthLogin) // 设备批准页登录形态（userCode）复用同一 handler
+	v1.GET("/oauth/userinfo", s.requireDB(), s.authCtx(), s.requireLogin(), s.handleUserInfo)
+	v1.GET("/.well-known/openid-configuration", s.handleOpenIDConfig)
 
 	// ---- 分享链接匿名访问（需求7，凭 token+密码，无需登录）----
 	shr := e.Group("/s/:token", s.maintenanceGate(), s.requireDB())
@@ -155,6 +179,14 @@ func (s *Server) registerV1(e *gin.Engine) {
 	auth.POST("/auth/change-password", s.handleChangePassword)
 	// 0.2.11 需求4：自助改昵称（仅展示名；不吊销会话、不触路径/键）
 	auth.PUT("/auth/profile", s.handleUpdateProfile)
+	// 0.2.12 二次验证自助面（选择性启用；邮箱绑定+OTP 确认；关闭=安全降级
+	// 吊销全会话）。客户端设置页数据源 GET /auth/mfa + handleMe 的 email/mfa。
+	auth.GET("/auth/mfa", s.handleMfaStatus)
+	auth.POST("/auth/mfa/totp/enroll", s.handleMfaTotpEnroll)
+	auth.POST("/auth/mfa/totp/confirm", s.handleMfaTotpConfirm)
+	auth.POST("/auth/mfa/email/send", s.handleMfaEmailSend)
+	auth.POST("/auth/mfa/email/confirm", s.handleMfaEmailConfirm)
+	auth.POST("/auth/mfa/disable", s.handleMfaDisable)
 
 	auth.POST("/mkdir", s.handleMkdir)
 	auth.POST("/mkdirs", s.handleMkdirs) // 需求41：目录上传批量建目录（加性端点）
@@ -214,6 +246,8 @@ func (s *Server) registerAdminAPI(admin *gin.RouterGroup) {
 	admin.GET("/userroots", s.handleAdminListAllUserRoots)
 	admin.GET("/users/:id/roots", s.handleAdminGetUserRoots)
 	admin.PUT("/users/:id/roots", s.handleAdminSetUserRoots)
+	// 0.2.12：用户二次验证治理（off|totp|email|reset；默认不使用）
+	admin.PUT("/users/:id/mfa", s.handleAdminUserMfa)
 	// 物理根只读目录浏览（分配目录时的选择器；仅管理端口可用）
 	admin.GET("/fs", s.handleAdminBrowseFS)
 	admin.GET("/groups", s.handleAdminListGroups)

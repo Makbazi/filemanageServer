@@ -444,6 +444,25 @@ func (f *fileStore) UpdateUserNickname(id int64, nickname string) error {
 	return f.syncNowLocked()
 }
 
+// UpdateUserAuth（0.2.12）：邮箱+二次验证四字段全量写入（password_hash 不触；
+// 关键安全元数据变更同改密/改昵称纪律同步 fsync）。
+func (f *fileStore) UpdateUserAuth(id int64, email string, emailVerified bool, mfaMethod, mfaSecret string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return closedErr()
+	}
+	r, ok := f.idx.users[id]
+	if !ok {
+		return ErrNotFound
+	}
+	r.Email, r.EmailVerified, r.MfaMethod, r.MfaSecret = email, b2i(emailVerified), mfaMethod, mfaSecret
+	if err := f.putLocked(tUsers, *r); err != nil {
+		return err
+	}
+	return f.syncNowLocked()
+}
+
 func (f *fileStore) UpdateUserRoots(id int64, roots []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

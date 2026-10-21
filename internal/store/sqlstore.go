@@ -199,6 +199,14 @@ func (s *sqlStore) UpdateUserNickname(id int64, nickname string) error {
 	return affectedG(s.db.Model(&userRow{}).Where("id = ?", id).Update("nickname", nickname))
 }
 
+// UpdateUserAuth（0.2.12）：邮箱+二次验证四列全量写入（map 式 Updates——
+// 空串/零值列不被跳过；password_hash 绝不触碰）。
+func (s *sqlStore) UpdateUserAuth(id int64, email string, emailVerified bool, mfaMethod, mfaSecret string) error {
+	return affectedG(s.db.Model(&userRow{}).Where("id = ?", id).
+		Updates(map[string]any{"email": email, "email_verified": b2i(emailVerified),
+			"mfa_method": mfaMethod, "mfa_secret": mfaSecret}))
+}
+
 func (s *sqlStore) UpdateUserRole(id int64, role string) error {
 	return affectedG(s.db.Model(&userRow{}).Where("id = ?", id).Update("role", role))
 }
@@ -964,6 +972,13 @@ func (s *sqlStore) GetAuthSessionByTokenHash(tokenHash string) (*AuthSession, er
 func (s *sqlStore) RenewAuthSession(id int64, expiresAt, lastUsedAt time.Time) error {
 	return affectedG(s.db.Model(&authSessionRow{}).Where("id = ?", id).
 		Updates(map[string]any{"expires_at": expiresAt, "last_used_at": lastUsedAt}))
+}
+
+// UpdateAuthSessionFlow（0.2.12）：按主键改写协议状态 JSON；RowsAffected=0 →
+// ErrNotFound（条目已被消费/吊销，调用方据此中止流程——与 Renew 同竞态判据）。
+func (s *sqlStore) UpdateAuthSessionFlow(id int64, flowData string) error {
+	return affectedG(s.db.Model(&authSessionRow{}).Where("id = ?", id).
+		Updates(map[string]any{"flow_data": flowData}))
 }
 
 func (s *sqlStore) DeleteAuthSessionByTokenHash(tokenHash string) error {
