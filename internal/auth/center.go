@@ -55,7 +55,7 @@ type Options struct {
 
 // Spec 签发参数。
 type Spec struct {
-	Kind     string // store.AuthKindUser | store.AuthKindShare
+	Kind     string // store.AuthKindUser | AuthKindShare | 0.2.12 新增 flow/code/browser/refresh/device/devuser
 	UserID   int64  // 0=超管哨兵；store.AuthShareUserID=-1=share
 	Username string
 	Role     string
@@ -64,6 +64,11 @@ type Spec struct {
 	Ref      string // share：绑定的链接 token
 	ClientID string // 0.2.4：客户端唯一标识（kind=user 且非空=绑定，逐请求核对
 	// X-Client-Id 头；空=未绑定——旧客户端/移动端/管理台会话）
+	FlowData string // 0.2.12：OAuth 协议状态 JSON（绝不含明文凭证；见 store.AuthSession）
+	// Plain（0.2.12）：设备授权 user_code 等"人类可读凭证"由调用方生成后直接
+	// 作条目凭证（键=其哈希，Issue 原样返回同值）；留空=自动生成随机凭证。
+	// 唯一性冲突（ErrExists）由调用方换新值重试。
+	Plain   string
 	TTL     time.Duration
 	Persist bool // false=仅 L1(+L2)：降级模式超管登录（对齐旧行为，重启即失效）
 }
@@ -109,6 +114,7 @@ type wireEntry struct {
 	Gen        int64     `json:"gen"`
 	Ref        string    `json:"ref"`
 	ClientID   string    `json:"clientId"`
+	FlowData   string    `json:"flowData,omitempty"` // 0.2.12（旧 L2 条目无此键→解出 ""）
 	ExpiresAt  time.Time `json:"expiresAt"`
 	LastUsedAt time.Time `json:"lastUsedAt"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -117,13 +123,25 @@ type wireEntry struct {
 func toWire(e *store.AuthSession) wireEntry {
 	return wireEntry{ID: e.ID, Kind: e.Kind, UserID: e.UserID, Username: e.Username,
 		Role: e.Role, Super: e.Super, Gen: e.Gen, Ref: e.Ref, ClientID: e.ClientID,
+		FlowData:  e.FlowData,
 		ExpiresAt: e.ExpiresAt, LastUsedAt: e.LastUsedAt, CreatedAt: e.CreatedAt}
 }
 
 func (w wireEntry) session(hash string) *store.AuthSession {
 	return &store.AuthSession{ID: w.ID, Kind: w.Kind, UserID: w.UserID, Username: w.Username,
-		Role: w.Role, Super: w.Super, Gen: w.Gen, Ref: w.Ref, ClientID: w.ClientID, TokenHash: hash,
+		Role: w.Role, Super: w.Super, Gen: w.Gen, Ref: w.Ref, ClientID: w.ClientID,
+		FlowData: w.FlowData, TokenHash: hash,
 		ExpiresAt: w.ExpiresAt, LastUsedAt: w.LastUsedAt, CreatedAt: w.CreatedAt}
+}
+
+// indexedByUser 0.2.12：按用户撤权（RevokeUser/删号/改密）的覆盖面判据——
+// share 行（user_id=-1 保留哨兵）除外，其余 kind（user/flow/code/browser/
+// refresh/device/devuser）凡 UserID≥0 一律进 L1 byUser 反向索引与 L2 每用户
+// 集合。语义：改密/删号即时吊销该用户的**全部**协议态条目（含尚未消费的
+// 授权码/登录中转/设备批准——旧"只清 user 行"会让 ≤memTTL 窗口内的 code 行
+// 继续可兑换，破坏撤权即失效的定义）。
+func indexedByUser(e *store.AuthSession) bool {
+	return e.Kind != store.AuthKindShare && e.UserID >= 0
 }
 
 // New 构造认证中心。redis Ping 失败仅告警不 fail-fast（区别于 cache.New：认证
@@ -175,7 +193,7 @@ func (c *Center) insertLocked(n *l1Node) {
 	}
 	n.elem = c.lru.PushFront(n)
 	c.l1[n.e.TokenHash] = n
-	if n.e.Kind == store.AuthKindUser {
+	if indexedByUser(n.e) {
 		set := c.byUser[n.e.UserID]
 		if set == nil {
 			set = map[string]struct{}{}
@@ -198,7 +216,7 @@ func (c *Center) removeLocked(n *l1Node) {
 		n.elem = nil
 	}
 	delete(c.l1, n.e.TokenHash)
-	if n.e.Kind == store.AuthKindUser {
+	if indexedByUser(n.e) {
 		if set := c.byUser[n.e.UserID]; set != nil {
 			delete(set, n.e.TokenHash)
 		}
@@ -238,7 +256,7 @@ func (c *Center) l2Put(ctx context.Context, e *store.AuthSession) {
 	pipe := c.rdb.Pipeline()
 	pipe.Set(ctx, keyPrefix+e.TokenHash, b, ttl)
 	pipe.ZAdd(ctx, idxKey, redis.Z{Score: float64(e.LastUsedAt.Unix()), Member: e.TokenHash})
-	if e.Kind == store.AuthKindUser {
+	if indexedByUser(e) {
 		skey := userPrefix + strconv.FormatInt(e.UserID, 10)
 		pipe.SAdd(ctx, skey, e.TokenHash)
 		pipe.Expire(ctx, skey, ttl) // 集合生命周期随最新条目滚动延长；残留指针由 RevokeUser 的 EXISTS 核验自清
@@ -279,7 +297,7 @@ func (c *Center) l2Delete(ctx context.Context, hash string, uid int64, kind stri
 	pipe := c.rdb.Pipeline()
 	pipe.Unlink(ctx, keyPrefix+hash)
 	pipe.ZRem(ctx, idxKey, hash)
-	if kind == store.AuthKindUser {
+	if indexedByUser(&store.AuthSession{Kind: kind, UserID: uid}) {
 		pipe.SRem(ctx, userPrefix+strconv.FormatInt(uid, 10), hash)
 	}
 	_, err := pipe.Exec(ctx)
@@ -323,9 +341,14 @@ func (c *Center) Issue(ctx context.Context, sp Spec) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if sp.Plain != "" {
+		plain = sp.Plain
+		hash = HashToken(plain)
+	}
 	now := time.Now()
 	e := &store.AuthSession{Kind: sp.Kind, UserID: sp.UserID, Username: sp.Username,
-		Role: sp.Role, Super: sp.Super, Gen: sp.Gen, Ref: sp.Ref, ClientID: sp.ClientID, TokenHash: hash,
+		Role: sp.Role, Super: sp.Super, Gen: sp.Gen, Ref: sp.Ref, ClientID: sp.ClientID,
+		FlowData: sp.FlowData, TokenHash: hash,
 		ExpiresAt: now.Add(sp.TTL), LastUsedAt: now, CreatedAt: now}
 	if sp.Persist {
 		if err := c.st.CreateAuthSession(e); err != nil {
@@ -340,7 +363,17 @@ func (c *Center) Issue(ctx context.Context, sp Spec) (string, error) {
 // Lookup 校验凭证（不改滑动时间——续期由调用方另行 Touch）。
 // ErrBadCredential=无效/过期/已撤；其余 error=存储故障（handler 归 503 语义）。
 func (c *Center) Lookup(ctx context.Context, credential string) (*store.AuthSession, error) {
-	hash := HashToken(credential)
+	return c.lookupHash(ctx, HashToken(credential))
+}
+
+// LookupHash 0.2.12：按已哈希键解析条目（OAuth 流程内以对方条目的哈希互引
+// 定位——如设备授权 user_code 行找到 device_code 行；哈希值是摘要非凭证，
+// 调用方不得把它当日志明文外的 anything 暴露面）。语义与 Lookup 完全一致。
+func (c *Center) LookupHash(ctx context.Context, hash string) (*store.AuthSession, error) {
+	return c.lookupHash(ctx, hash)
+}
+
+func (c *Center) lookupHash(ctx context.Context, hash string) (*store.AuthSession, error) {
 	now := time.Now()
 
 	c.mu.Lock()
@@ -429,6 +462,46 @@ func (c *Center) Revoke(ctx context.Context, credential string) error {
 	c.pendingRevoke[hash] = struct{}{}
 	c.mu.Unlock()
 	return c.revokeTail(ctx, hash, uid, kind)
+}
+
+// RevokeByHash 0.2.12：按已哈希键撤权（流程行互引销毁；语义同 Revoke，
+// 哈希只作定位键——绝不把哈希值本身当日志之外的暴露面）。
+func (c *Center) RevokeByHash(ctx context.Context, hash string) error {
+	c.mu.Lock()
+	var uid int64
+	var kind string
+	if n := c.l1[hash]; n != nil {
+		uid, kind = n.e.UserID, n.e.Kind
+		c.removeLocked(n)
+	}
+	c.pendingRevoke[hash] = struct{}{}
+	c.mu.Unlock()
+	return c.revokeTail(ctx, hash, uid, kind)
+}
+
+// UpdateFlow 0.2.12：推进一条认证图条目的协议状态（flow 阶段跃迁、设备码
+// 批准、待验证邮箱 OTP 挂载等）。L3 同步落库（关键流程节点，绝不静默丢），
+// L1 就地更新快照，L2 重灌（含新 FlowData）。条目已被消费/吊销（ErrNotFound）
+// → 返回该哨兵，调用方据此中止流程（防双花）。e 必须是本中心 Lookup/Issue
+// 返回的权威快照（按 TokenHash 寻址 L1/L2）。
+func (c *Center) UpdateFlow(ctx context.Context, e *store.AuthSession, flowData string) error {
+	if e == nil {
+		return errors.New("auth: UpdateFlow nil entry")
+	}
+	if e.ID > 0 {
+		if err := c.st.UpdateAuthSessionFlow(e.ID, flowData); err != nil {
+			return err
+		}
+	}
+	c.mu.Lock()
+	if n := c.l1[e.TokenHash]; n != nil {
+		n.e.FlowData = flowData
+	}
+	c.mu.Unlock()
+	cp := *e
+	cp.FlowData = flowData
+	c.l2Put(ctx, &cp)
+	return nil
 }
 
 func (c *Center) revokeTail(ctx context.Context, hash string, uid int64, kind string) error {

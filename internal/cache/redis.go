@@ -39,11 +39,14 @@ func (Noop) FlushAll() error                                  { return nil }
 
 // ---------- Redis ----------
 
-// userWire 为影子结构：User.PasswordHash 是 json:"-"（防 API 泄露），
-// 缓存必须完整往返，故单独建镜像类型持久化（redis 值不出服务端进程，等同入库级别）。
+// userWire 为影子结构：User.PasswordHash/MfaSecret 是 json:"-"（防 API 泄露），
+// 缓存必须完整往返，故单独建镜像类型持久化（redis 值不出服务端进程，等同入库
+// 级别；0.2.12 起 MfaSecret=TOTP 密钥同 PasswordHash 对称处理——装饰器命中
+// 缓存也须能取回密钥完成二次验证，UpdateUserAuth 写后 DropUser 即时失效）。
 type userWire struct {
 	U            store.User `json:"u"`
 	PasswordHash string     `json:"ph"`
+	MfaSecret    string     `json:"ms"`
 }
 
 type Redis struct {
@@ -99,11 +102,13 @@ func (r *Redis) GetUser(id int64) (*store.User, bool, error) {
 	}
 	u := w.U
 	u.PasswordHash = w.PasswordHash
+	u.MfaSecret = w.MfaSecret
 	return &u, true, nil
 }
 
 func (r *Redis) PutUser(u *store.User) error {
-	return r.setJSON("fm:u:"+strconv.FormatInt(u.ID, 10), userWire{U: *u, PasswordHash: u.PasswordHash}, r.userTTL)
+	return r.setJSON("fm:u:"+strconv.FormatInt(u.ID, 10),
+		userWire{U: *u, PasswordHash: u.PasswordHash, MfaSecret: u.MfaSecret}, r.userTTL)
 }
 
 func (r *Redis) DropUser(id int64) error {

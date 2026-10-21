@@ -1,14 +1,19 @@
 # filemanageServer
 
 FileManage 体系的服务端（gin 提供 REST API，统一 `/api/v1`）：不透明随机凭证认证
-（服务端三层认证图，0.2.3 起**不再使用 JWT**）、目录级权限（ACL）、临时分享链接、
+（服务端三层认证图，0.2.3 起**不再使用 JWT**；0.2.12 起本服务端兼任**私有
+OAuth2/OIDC 授权方**：桌面/移动客户端走授权码+PKCE（系统浏览器登录页、
+127.0.0.1/自定义 scheme 回调、Bearer Access Token+刷新令牌换发、RFC 8628 设备码
+兜底），管理台走 **BFF+HttpOnly Cookie 会话**；二次验证 TOTP/邮箱验证码默认不启用、
+客户端自助选择性启用、管理端可治理；邮箱为**非必须配置**——`mail` 段未配则邮箱
+通道关闭、TOTP 不受影响；旧账密直登端点保留供旧客户端降级），目录级权限（ACL）、临时分享链接、
 分片上传/断点续传、文件版本管理、回收站 30 天自动清理、
 传输限速、TLS、内嵌管理员 Web 界面（`/admin/`）、多实例与负载均衡（内置 balancer / nginx）、
 容器化部署。元数据存储内建于 `internal/store`（**file / sqlite3 / mysql / postgresql** 四驱动可选，
 可选 redis 缓存；未配置数据库时默认内置 `file` 文件存储、全功能可用——单实例 flock，见 0.1.1），
 store 层为工程内建（独立工程 filemanageDb 已并入、不再存在）。
 
-当前版本：**0.2.8**（产物版本由 git tag 经 `-ldflags` 注入 `internal/version`，见 `CHANGELOG.md`；0.2.8=上传限额默认批：maxUploadBytes 2GiB→0=不限，config schemaVersion 11→12）
+当前版本：**0.2.12**（产物版本由 git tag 经 `-ldflags` 注入 `internal/version`，见 `CHANGELOG.md`；0.2.12=认证批：OAuth2/OIDC 授权码+PKCE/设备码、TOTP/邮箱二次验证（默认不启用）、邮箱非必须配置、管理台 BFF+Cookie；config schemaVersion 12→13；配套 Client 0.3.13 / filemanagemobile 0.2.0）
 
 ## 快速开始（Get Start）
 

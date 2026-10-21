@@ -25,7 +25,9 @@ func pgDDL() []string {
 			password_hash TEXT NOT NULL,
 			role TEXT NOT NULL DEFAULT 'user',
 			allowed_roots TEXT NOT NULL DEFAULT '[]',
-			created_at TIMESTAMP NOT NULL)`,
+			created_at TIMESTAMP NOT NULL,
+			email TEXT NOT NULL DEFAULT '', email_verified INTEGER NOT NULL DEFAULT 0,
+			mfa_method TEXT NOT NULL DEFAULT '', mfa_secret TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS file_metas (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL, root_id TEXT NOT NULL, path TEXT NOT NULL,
@@ -111,6 +113,7 @@ func pgDDL() []string {
 			username TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '',
 			super INTEGER NOT NULL DEFAULT 0, gen BIGINT NOT NULL DEFAULT 0,
 			ref TEXT NOT NULL DEFAULT '', client_id TEXT NOT NULL DEFAULT '',
+			flow_data TEXT NOT NULL DEFAULT '',
 			token_hash TEXT NOT NULL UNIQUE,
 			expires_at TIMESTAMP NOT NULL, last_used_at TIMESTAMP NOT NULL,
 			created_at TIMESTAMP NOT NULL)`,
@@ -119,14 +122,22 @@ func pgDDL() []string {
 }
 
 // pgEnsureExtra 存量库加列守卫（0.2.4 auth_sessions.client_id、
-// 0.2.11 users.nickname；只增不改，属幂等 DDL 清单的组成部分——pg 原生支持
+// 0.2.11 users.nickname、0.2.12 auth_sessions.flow_data + users 邮箱/二次验证
+// 四列；只增不改，属幂等 DDL 清单的组成部分——pg 原生支持
 // ADD COLUMN IF NOT EXISTS）。
 func pgEnsureExtra(db *gorm.DB) error {
-	if err := db.Exec("ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS client_id TEXT NOT NULL DEFAULT ''").Error; err != nil {
-		return fmt.Errorf("migrate: add client_id: %w", err)
-	}
-	if err := db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname TEXT NOT NULL DEFAULT ''").Error; err != nil {
-		return fmt.Errorf("migrate: add users.nickname: %w", err)
+	for _, stmt := range []string{
+		"ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS client_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE users ADD COLUMN IF NOT EXISTS nickname TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS flow_data TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_method TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_secret TEXT NOT NULL DEFAULT ''",
+	} {
+		if err := db.Exec(stmt).Error; err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
 	}
 	return nil
 }

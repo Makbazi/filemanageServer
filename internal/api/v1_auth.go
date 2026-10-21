@@ -56,9 +56,11 @@ func userView(u *store.User) map[string]any {
 			"id": u.ID, "username": u.Username, "nickname": u.Nickname, "role": u.Role, "super": true,
 		}
 	}
+	// 0.2.12：管理面展示邮箱与二验形态（MfaSecret 绝不出 API——口令哈希同理）。
 	return map[string]any{
 		"id": u.ID, "username": u.Username, "nickname": u.Nickname, "role": u.Role,
 		"allowedRoots": u.AllowedRoots, "createdAt": u.CreatedAt,
+		"email": u.Email, "emailVerified": u.EmailVerified, "mfa": u.MfaMethod,
 	}
 }
 
@@ -172,6 +174,15 @@ func (s *Server) handleLogin(c *gin.Context) {
 		writeErr(c, http.StatusForbidden, errors.New("管理员账号请使用服务端管理界面登录"))
 		return
 	}
+	// 0.2.12：该账户已启用二次验证——旧账密直登端点无法承载二验步骤，
+	// 一律 403 明确拒绝（升级客户端走 OAuth 授权码+PKCE 登录，或在管理端
+	// 关闭该账户二次验证）。未启用二验的账户走本端点行为完全不变。
+	if u.MfaMethod != store.MfaOff {
+		logx.WarnT(traceOf(c), "login: 账户已启用二次验证，旧直登端点拒绝 account=%q ip=%s", req.Username, ip)
+		s.audit(c, store.AuditLoginFail, req.Username, u.ID, "", "", "mfa required, legacy login rejected")
+		writeErr(c, http.StatusForbidden, errors.New("该账户已启用二次验证，请使用客户端浏览器登录（OAuth）；旧版客户端不支持，请先升级"))
+		return
+	}
 	s.guard.Reset(bKey, ip)
 	s.audit(c, store.AuditLogin, u.Username, u.ID, "", "", "login ok")
 	cred, err := s.issueSession(c.Request.Context(), u, req.ClientID)
@@ -232,6 +243,7 @@ func (s *Server) handleAdminLogin(c *gin.Context) {
 				return
 			}
 			logx.InfoT(traceOf(c), "admin-login: 超管登录管理台成功 account=%q ip=%s", req.Username, ip)
+			s.setCookie(c, adminCookie, cred, s.Cfg.AccessTTLDuration()) // 0.2.12 BFF：HttpOnly Cookie
 			writeJSON(c, http.StatusOK, map[string]any{
 				"token": cred,
 				"user":  userView(&store.User{ID: store.SuperAdminID, Username: req.Username, Role: store.RoleAdmin}),
@@ -270,7 +282,29 @@ func (s *Server) handleAdminLogin(c *gin.Context) {
 		return
 	}
 	logx.InfoT(traceOf(c), "admin-login: DB 管理员登录管理台成功 account=%q ip=%s", u.Username, ip)
+	s.setCookie(c, adminCookie, cred, s.Cfg.AccessTTLDuration()) // 0.2.12 BFF：HttpOnly Cookie
 	writeJSON(c, http.StatusOK, map[string]any{"token": cred, "user": userView(u)})
+}
+
+// handleAdminLogout POST /api/v1/admin/logout（0.2.12 BFF）：清 Cookie +
+// 尽力撤销当前会话凭证（Cookie 或 Authorization 头形态皆可）。幂等 200。
+func (s *Server) handleAdminLogout(c *gin.Context) {
+	cred := ""
+	if v, err := c.Request.Cookie(adminCookie); err == nil {
+		cred = v.Value
+	}
+	if cred == "" {
+		if h := c.Request.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			cred = strings.TrimPrefix(h, "Bearer ")
+		}
+	}
+	if cred != "" {
+		if err := s.Auth.Revoke(c.Request.Context(), cred); err != nil {
+			logx.WarnT(traceOf(c), "admin: logout revoke failed: %v", err)
+		}
+	}
+	s.clearCookie(c, adminCookie)
+	writeJSON(c, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleRefresh 已于 0.2.4 移除：活跃滑动续期由 authCtx→Touch 在服务端无感完成
@@ -379,6 +413,8 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 // 端口。昵称可改，故必须现读库（认证图条目的 Username=账户 冻结值依旧不查库
 // 即可判定身份；本端点位于 requireDB 的 auth 组内，一次性读取可接受，
 // 热路径 authCtx 的零查库红线不破）。
+// 0.2.12 加性扩展：email/emailVerified/mfa（账户自助二验页的数据源；数字
+// 用户 id 依旧绝不可见；MfaSecret 永不下发）。
 func (s *Server) handleMe(c *gin.Context) {
 	u := currentUser(c)
 	if u == nil {
@@ -386,11 +422,12 @@ func (s *Server) handleMe(c *gin.Context) {
 		return
 	}
 	if cur, err := s.Store.GetUserByID(u.ID); err == nil {
-		writeJSON(c, http.StatusOK, map[string]any{"username": cur.Username, "nickname": cur.Nickname})
+		writeJSON(c, http.StatusOK, map[string]any{"username": cur.Username, "nickname": cur.Nickname,
+			"email": cur.Email, "emailVerified": cur.EmailVerified, "mfa": cur.MfaMethod})
 		return
 	}
-	// 库读失败退化用认证图条目（昵称空=客户端回退显示账户）
-	writeJSON(c, http.StatusOK, map[string]any{"username": u.Username, "nickname": ""})
+	// 库读失败退化用认证图条目（昵称空=客户端回退显示账户；二验字段留空）
+	writeJSON(c, http.StatusOK, map[string]any{"username": u.Username, "nickname": "", "mfa": ""})
 }
 
 // handleUpdateProfile PUT /api/v1/auth/profile {nickname}
@@ -465,6 +502,11 @@ func (s *Server) handleHealth(c *gin.Context) {
 func bcryptHash(pw string) (string, error) {
 	h, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
 	return string(h), err
+}
+
+// checkPassword bcrypt 口令核对（0.2.12：登录/自助二验/旧端点共用一处判据）。
+func checkPassword(hash, pw string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pw)) == nil
 }
 
 // createUser 唯一的用户创建入口（管理台建号专用，无自助注册）。

@@ -110,6 +110,16 @@ func (s *cached) UpdateUserNickname(id int64, nickname string) error {
 	return s.c.DropUser(id)
 }
 
+// UpdateUserAuth（0.2.12）：影子结构含邮箱/二次验证字段，写后必须逐出用户缓存
+// （同改昵称纪律；认证图不经本装饰器——UpdateAuthSessionFlow 由嵌入的
+// store.Store 天然透传，会话行刻意不进本缓存）。
+func (s *cached) UpdateUserAuth(id int64, email string, emailVerified bool, mfaMethod, mfaSecret string) error {
+	if err := s.Store.UpdateUserAuth(id, email, emailVerified, mfaMethod, mfaSecret); err != nil {
+		return err
+	}
+	return s.c.DropUser(id)
+}
+
 func (s *cached) UpdateUserRole(id int64, role string) error {
 	if err := s.Store.UpdateUserRole(id, role); err != nil {
 		return err

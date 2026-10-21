@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"filemanageServer/internal/fileops"
@@ -26,7 +27,7 @@ func (s *Server) handleAdminInfo(c *gin.Context) {
 		rt := &s.Cfg.Roots[i]
 		roots = append(roots, map[string]string{"id": rt.ID, "name": rt.Name, "path": rt.Path})
 	}
-	writeJSON(c, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"version":            version.Version,
 		"apiVersions":        version.APIVersions,
 		"instanceId":         s.Cfg.InstanceID,
@@ -50,7 +51,13 @@ func (s *Server) handleAdminInfo(c *gin.Context) {
 		"roots":              roots,
 		"uptimeSec":          int64(time.Since(s.startedAt).Seconds()),
 		"goVersion":          runtime.Version(),
-	})
+	}
+	// 0.2.12 BFF：登录态由 Cookie 承载、前端不持凭证——info 顺带回显当前管理
+	// 员概要（userView 管理面自有字段），控制台刷新页面即可恢复顶栏显示。
+	if cu := currentUser(c); cu != nil {
+		out["who"] = userView(cu)
+	}
+	writeJSON(c, http.StatusOK, out)
 }
 
 // ---------- 用户管理 ----------
@@ -139,12 +146,32 @@ func (s *Server) handleAdminUpdateUser(c *gin.Context) {
 	var req struct {
 		Password     string   `json:"password"`
 		Nickname     *string  `json:"nickname"` // 0.2.11：指针区分"未传/传入（含空串清除）"
+		Email        *string  `json:"email"`    // 0.2.12：同上（登记邮箱；变更即清验证态）
 		Role         string   `json:"role"`
 		AllowedRoots []string `json:"allowedRoots"`
 	}
 	if err := decode(c, &req); err != nil {
 		writeErr(c, http.StatusBadRequest, err)
 		return
+	}
+	// 0.2.12：管理员登记/修改邮箱——不做 SMTP 验证（验证=用户自助 OTP 流程），
+	// 值变化即 emailVerified=false；若该账户二验通道是 email，改后下次登录会被
+	// 引导报错（须先重新验证邮箱），此处不静默改 method（治理入口=PUT /users/:id/mfa）。
+	if req.Email != nil && target.Role == store.RoleUser {
+		em := strings.ToLower(strings.TrimSpace(*req.Email))
+		if em != "" && !validEmail(em) {
+			writeErr(c, http.StatusBadRequest, errors.New("邮箱地址格式不正确"))
+			return
+		}
+		if em != target.Email {
+			verified := false
+			if err := s.Store.UpdateUserAuth(target.ID, em, verified, target.MfaMethod, target.MfaSecret); err != nil {
+				writeErr(c, statusOf(err), err)
+				return
+			}
+			logx.InfoT(traceOf(c), "admin: 登记邮箱变更 id=%d account=%q clearedVerified=%v", target.ID, target.Username, target.EmailVerified)
+		}
+		target.Email, target.EmailVerified = em, false
 	}
 	if req.Nickname != nil {
 		nick, code, nerr := normalizeNickname(*req.Nickname)

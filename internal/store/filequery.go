@@ -671,6 +671,26 @@ func (f *fileStore) RenewAuthSession(id int64, expiresAt, lastUsedAt time.Time) 
 	return f.putLocked(tAuthSessions, *r) // 不 fsync：写后补走批量刷盘
 }
 
+// UpdateAuthSessionFlow（0.2.12）：按主键改写协议状态 JSON。无行→ErrNotFound
+// （已被消费/吊销——与 Renew 同竞态判据）。登录中转/设备批准的推进属关键流
+// 程节点，同步 fsync（跨实例可见性优先于吞吐；这类写入每登录至多个位数）。
+func (f *fileStore) UpdateAuthSessionFlow(id int64, flowData string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return closedErr()
+	}
+	r, ok := f.idx.authSessions[id]
+	if !ok {
+		return ErrNotFound
+	}
+	r.FlowData = flowData
+	if err := f.putLocked(tAuthSessions, *r); err != nil {
+		return err
+	}
+	return f.syncNowLocked()
+}
+
 func (f *fileStore) DeleteAuthSessionByTokenHash(tokenHash string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

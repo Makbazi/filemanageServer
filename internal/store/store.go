@@ -55,6 +55,10 @@ type Store interface {
 	ListUsers() ([]*User, error)
 	UpdateUserPassword(id int64, hash string) error
 	UpdateUserNickname(id int64, nickname string) error // 0.2.11：昵称可改可重复，仅展示用
+	// UpdateUserAuth（0.2.12 认证批）：邮箱与二次验证四字段全量写入
+	// （email/verified 来自绑定确认；mfaMethod ∈ ""|totp|email；
+	// mfaSecret=TOTP 密钥或 ""——只增不改列、绝不触 password_hash）。
+	UpdateUserAuth(id int64, email string, emailVerified bool, mfaMethod, mfaSecret string) error
 	UpdateUserRoots(id int64, roots []string) error // 旧字段；仅作迁移输入
 	UpdateUserRole(id int64, role string) error
 	DeleteUser(id int64) error
@@ -144,6 +148,9 @@ type Store interface {
 	CreateAuthSession(a *AuthSession) error
 	GetAuthSessionByTokenHash(tokenHash string) (*AuthSession, error)
 	RenewAuthSession(id int64, expiresAt, lastUsedAt time.Time) error // 无行→ErrNotFound（撤权竞态判据）
+	// UpdateAuthSessionFlow（0.2.12）：按主键改写 FlowData（登录中转/设备码批准
+	// 等协议状态推进）。无行→ErrNotFound（条目已被消费/吊销——调用方据此中止）。
+	UpdateAuthSessionFlow(id int64, flowData string) error
 	DeleteAuthSessionByTokenHash(tokenHash string) error
 	DeleteAuthSessionsByUser(userID int64) error // userID<0 非法（share 保留 -1，调用方守门）
 	DeleteExpiredAuthSessions(now time.Time) error
