@@ -77,7 +77,7 @@ func runBalancer(cfgPath string) {
 		os.Exit(1)
 	}
 	if err := balancer.Run(cfg.Listen, cfg.Balancer.Workers, cfg.LANOnly); err != nil {
-		log.Fatal(err)
+		logx.Fatal("balancer 退出: %v", err)
 	}
 }
 
@@ -108,7 +108,7 @@ func runWorker(cfgPath string) {
 	super := superadmin.New(cfg.AdminAccountFile())
 	name, pw, created, err := super.EnsureCreated()
 	if err != nil {
-		log.Fatalf("init superadmin account: %v", err)
+		logx.Fatal("init superadmin account: %v", err)
 	}
 	if created {
 		// 敏感口令只回显控制台、不入日志文件（需求4）
@@ -120,7 +120,7 @@ func runWorker(cfgPath string) {
 		// 纪元推进即吊销旧令牌；用后请清空该字段（不自动清除：配置回写有泄 jwtSecret
 		// 结构风险，沿用"人工清空"的恢复口令约定）。
 		if _, serr := super.SetCredentials("", cfg.AdminPassword); serr != nil {
-			log.Fatalf("reset superadmin password from config: %v", serr)
+			logx.Fatal("reset superadmin password from config: %v", serr)
 		}
 		log.Printf("adminPassword: 已重置超级管理员 %q 的口令（明文，首次登录后转密文）；请清空配置文件中的 adminPassword 字段", name)
 	}
@@ -132,7 +132,7 @@ func runWorker(cfgPath string) {
 	// （connect→建表→可选全表搬迁→原子换入）；装饰顺序 Open→Proxy→cache.Wrap(Proxy)。
 	st, err := store.Open(store.Options{Driver: cfg.DB.Driver, DSN: cfg.DB.DSN})
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		logx.Fatal("open store: %v", err)
 	}
 	proxy := store.NewProxy(st)
 	defer proxy.Close()
@@ -140,7 +140,7 @@ func runWorker(cfgPath string) {
 	var cch cache.Cache
 	if !store.Degraded(proxy) {
 		if err := st.Migrate(); err != nil {
-			log.Fatalf("migrate: %v", err)
+			logx.Fatal("migrate: %v", err)
 		}
 		// 0.1.0 需求32：超管改由账户文件承载。旧版曾在库内建恢复管理员
 		// （常为 "admin"）——登录按超管优先匹配后该记录被永久遮蔽，告警提示处理。
@@ -150,7 +150,12 @@ func runWorker(cfgPath string) {
 		// 需求3（顺序在 jailmodel 之后：两者都是 SetUserRoots 全量替换语义）：
 		// 存量用户补齐 <dataDir>/Users/<用户名> 家目录与 _users 分配（幂等标记）。
 		if err := fileops.EnsureUserHomes(st, cfg.UsersDir()); err != nil {
-			log.Printf("warn: 用户家目录迁移未完成（下次启动重试）: %v", err)
+			logx.Warn("用户家目录迁移未完成（下次启动重试）: %v", err)
+		}
+		// 0.2.11（顺序在 v7 之后）：家目录改名 user_<账户>_<id> + 回收站并级
+		// _trash + 存量物理键行改写（幂等标记 userhomes.v8）。
+		if err := fileops.MigrateUserHomeLayout(st, cfg.UsersDir()); err != nil {
+			logx.Warn("家目录 0.2.11 布局迁移未完成（下次启动重试）: %v", err)
 		}
 		// 暴露面提示（0.1.0 改写）：引导注册已移除、超管恒在账户文件——
 		// 对外开放不再有"首注抢管理员"风险，但管理端口 adminAccess=lan/any
@@ -160,7 +165,7 @@ func runWorker(cfgPath string) {
 		}
 	} else {
 		// 0.1.1 正常路径不可达（无库=文件存储恒可开）；保留作纵深防御提示。
-		log.Printf("warn: 元数据存储不可用（异常路径：文件存储未打开成功？），依赖元数据的端点返回 503；管理台可在\"数据库\"页配置并热连接")
+		logx.Warn("元数据存储不可用（异常路径：文件存储未打开成功？），依赖元数据的端点返回 503；管理台可在\"数据库\"页配置并热连接")
 	}
 	// 可选 redis 缓存（非必须）：启用时启动即 PING，连不上 fail-fast；
 	// 装饰器包在 Proxy 之上（热切换发生在其下）。降级模式无法启用缓存；
@@ -168,7 +173,7 @@ func runWorker(cfgPath string) {
 	if cfg.Cache.Enabled && !store.Degraded(proxy) {
 		rc, cerr := cache.New(cfg.Cache)
 		if cerr != nil {
-			log.Fatalf("cache: %v", cerr)
+			logx.Fatal("cache: %v", cerr)
 		}
 		defer rc.Close()
 		eff = cache.Wrap(proxy, rc)
@@ -194,21 +199,21 @@ func runWorker(cfgPath string) {
 		TouchWriteEvery: cfg.AuthTouchWriteEvery(),
 	})
 	if err != nil {
-		log.Fatalf("auth center: %v", err)
+		logx.Fatal("auth center: %v", err)
 	}
 	// 重启恢复：预热未过期条目进 L1；失败非致命（读路径惰性回源持久层兜底）。
 	if err := authCenter.WarmStart(context.Background()); err != nil {
-		log.Printf("warn: 认证图预热未完成（读路径惰性恢复兜底）: %v", err)
+		logx.Warn("认证图预热未完成（读路径惰性恢复兜底）: %v", err)
 	}
 
 	srv, err := api.NewServer(cfg, eff, proxy, cch, cfgPath, super, authCenter)
 	if err != nil {
-		log.Fatalf("init server: %v", err)
+		logx.Fatal("init server: %v", err)
 	}
 
 	for _, dir := range []string{cfg.TrashDir, cfg.UploadStagingDir, cfg.Versions.Dir, cfg.UsersDir()} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			log.Fatalf("mkdir %s: %v", dir, err)
+			logx.Fatal("mkdir %s: %v", dir, err)
 		}
 	}
 
@@ -245,11 +250,11 @@ func runWorker(cfgPath string) {
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatal(err)
+		logx.Fatal("用户端口监听 %s 失败: %v", addr, err)
 	}
 	lnAdmin, err := net.Listen("tcp", cfg.AdminListen)
 	if err != nil {
-		log.Fatalf("管理端口监听 %s 失败（管理面独立端口，客户端不可达）: %v", cfg.AdminListen, err)
+		logx.Fatal("管理端口监听 %s 失败（管理面独立端口，客户端不可达）: %v", cfg.AdminListen, err)
 	}
 
 	// TLS（需求3：传输过程加密）。管理端口同样承载（本机浏览器用 https 时信任自签）。
@@ -257,21 +262,33 @@ func runWorker(cfgPath string) {
 		certFile, keyFile := cfg.TLS.CertFile, cfg.TLS.KeyFile
 		if certFile == "" || keyFile == "" {
 			if !cfg.TLS.AutoSelfSign {
-				log.Fatal("tls.enabled=true 但未配置 certFile/keyFile（或开启 autoSelfSign）")
+				logx.Fatal("tls.enabled=true 但未配置 certFile/keyFile（或开启 autoSelfSign）")
 			}
 			certFile, keyFile, err = tlsx.EnsureSelfSigned(cfg.TLSDir()) // 归入 dataDir
 			if err != nil {
-				log.Fatalf("generate self-signed cert: %v", err)
+				logx.Fatal("generate self-signed cert: %v", err)
 			}
 			log.Printf("已生成自签证书: %s / %s（客户端需信任或开启跳过校验）", certFile, keyFile)
 		}
 		log.Printf("TLS 已启用（HTTPS），访问地址请使用 https://；管理台: https://%s/admin/", cfg.AdminListen)
-		go func() { log.Fatal(http.ServeTLS(lnAdmin, adminHandler, certFile, keyFile)) }()
-		log.Fatal(http.ServeTLS(ln, handler, certFile, keyFile))
+		go func() {
+			if serr := http.ServeTLS(lnAdmin, adminHandler, certFile, keyFile); serr != nil {
+				logx.Fatal("管理端口服务异常退出: %v", serr)
+			}
+		}()
+		if serr := http.ServeTLS(ln, handler, certFile, keyFile); serr != nil {
+			logx.Fatal("用户端口服务异常退出: %v", serr)
+		}
 	}
 	log.Printf("管理台（仅 %s 可达）: http://%s/admin/", cfg.AdminListen, cfg.AdminListen)
-	go func() { log.Fatal(http.Serve(lnAdmin, adminHandler)) }()
-	log.Fatal(http.Serve(ln, handler))
+	go func() {
+		if serr := http.Serve(lnAdmin, adminHandler); serr != nil {
+			logx.Fatal("管理端口服务异常退出: %v", serr)
+		}
+	}()
+	if serr := http.Serve(ln, handler); serr != nil {
+		logx.Fatal("用户端口服务异常退出: %v", serr)
+	}
 }
 
 // migrateUserRoots jail 模型一次性存量迁移（server_meta 标记幂等）：
@@ -281,7 +298,7 @@ func runWorker(cfgPath string) {
 func migrateUserRoots(st store.Store, cfg *config.Config) {
 	done, err := st.GetMeta("jailmodel.v5")
 	if err != nil {
-		log.Printf("warn: jail 模型迁移检查失败: %v", err)
+		logx.Warn("jail 模型迁移检查失败: %v", err)
 		return
 	}
 	if done == "done" {
@@ -289,7 +306,7 @@ func migrateUserRoots(st store.Store, cfg *config.Config) {
 	}
 	users, err := st.ListUsers()
 	if err != nil {
-		log.Printf("warn: jail 模型迁移失败: %v", err)
+		logx.Warn("jail 模型迁移失败: %v", err)
 		return
 	}
 	n := 0
@@ -318,13 +335,13 @@ func migrateUserRoots(st store.Store, cfg *config.Config) {
 			continue
 		}
 		if err := st.SetUserRoots(u.ID, list); err != nil {
-			log.Printf("warn: 用户 %s 的目录分配迁移失败: %v", u.Username, err)
+			logx.Warn("用户 %s 的目录分配迁移失败: %v", u.Username, err)
 			continue
 		}
 		n++
 	}
 	if err := st.SetMeta("jailmodel.v5", "done"); err != nil {
-		log.Printf("warn: jail 模型迁移标记写入失败: %v", err)
+		logx.Warn("jail 模型迁移标记写入失败: %v", err)
 		return
 	}
 	if n > 0 {
@@ -355,7 +372,7 @@ func warnShadowedAdmins(st store.Store, super *superadmin.Store) {
 	}
 	for _, u := range users {
 		if u.Username == name {
-			log.Printf("警告: 数据库中存在与超级管理员同名的账户 %q（id=%d，历史恢复口令流程遗留）——登录按超管优先匹配，该记录已无法登录，请在管理台确认后删除或改名其分配/权限", name, u.ID)
+			logx.Warn("数据库中存在与超级管理员同名的账户 %q（id=%d，历史恢复口令流程遗留）——登录按超管优先匹配，该记录已无法登录，请在管理台确认后删除或改名其分配/权限", name, u.ID)
 		}
 	}
 }

@@ -89,15 +89,41 @@ func (c *Cleaner) cleanTrash() (int, error) {
 	return n, nil
 }
 
-// removeTrashBlob 清理回收站实体的两候选位置：
-// 家目录内 .fmtrash（用户名可安全作目录名时）与中央遗留路径。
+// removeTrashBlob 清理回收站实体的全部候选位置（0.2.11，新→旧逐一 RemoveAll，
+// 存在才删、天然幂等）：并级 <家目录名>_trash、迁移中间态（新名内 .fmtrash）、
+// 旧布局名内 .fmtrash、中央遗留路径。家目录名以分配行 SubPath 为准（缺失时按
+// user_<账户>_<id> 现算；账户名不可安全作目录名时退回旧名直拼）。
 func (c *Cleaner) removeTrashBlob(it *store.TrashItem) {
 	if c.UsersDir != "" {
-		if u, err := c.Store.GetUserByID(it.UserID); err == nil && UsernameAsDir(u.Username) == nil {
-			_ = os.RemoveAll(HomeTrashPath(c.UsersDir, u.Username, it.TrashID))
+		if u, err := c.Store.GetUserByID(it.UserID); err == nil {
+			home := HomeDirName(u.Username, u.ID)
+			if sub := c.homeSub(it.UserID); sub != "" {
+				home = sub
+			}
+			for _, p := range TrashBlobCandidates(c.UsersDir, home, &u.Username, it.TrashID) {
+				_ = os.RemoveAll(p)
+			}
+			if UsernameAsDir(u.Username) != nil {
+				// 不安全账户名遗留（迁移跳过的用户）：实体只可能在旧名目录内。
+				_ = os.RemoveAll(HomeTrashPath(c.UsersDir, u.Username, it.TrashID))
+			}
 		}
 	}
 	_ = os.RemoveAll(TrashPath(c.TrashDir, it.UserID, it.TrashID))
+}
+
+// homeSub 用户家目录分配的 SubPath（无分配返回 ""）。
+func (c *Cleaner) homeSub(userID int64) string {
+	urs, err := c.Store.ListUserRoots(userID)
+	if err != nil {
+		return ""
+	}
+	for _, r := range urs {
+		if r.RootID == store.HomeRootID {
+			return CleanRel(r.SubPath)
+		}
+	}
+	return ""
 }
 
 // cleanUploadSessions 清理已结束的上传会话（保留 24h 供查询）与

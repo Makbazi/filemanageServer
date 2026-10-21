@@ -99,6 +99,9 @@ func (s *Server) handleAdminPutSuper(c *gin.Context) {
 		who = "password"
 	}
 	s.audit(c, store.AuditSuperUpdate, acct.Username, store.SuperAdminID, "", "", "superadmin account updated: "+who)
+	// 0.2.12 BFF：重发的新凭证同步写回 fm_admin Cookie（纪元推进已清旧会话，
+	// 管理台无需本地换 token）。
+	s.setCookie(c, adminCookie, at, s.Cfg.AccessTTLDuration())
 	// 0.2.4 响应收敛：accessToken/expiresIn 别名删除（管理台只读 token/username，
 	// 见 app.js saveSuper），保留 user 概要之外的管理面自有字段。
 	writeJSON(c, http.StatusOK, map[string]any{

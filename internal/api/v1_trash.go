@@ -12,12 +12,14 @@ import (
 	store "filemanageServer/internal/store"
 )
 
-// 服务端回收站 = 磁盘实体 + 库中条目记录（需求3）：
-//   - 有家目录（_users 分配，正常建用户即有）→ 实体在 <dataDir>/Users/<用户名>/.fmtrash/<trashID>；
+// 服务端回收站 = 磁盘实体 + 库中条目记录（需求3；0.2.11 需求5 回收站并级化）：
+//   - 有家目录（_users 分配，正常建用户即有）→ 实体在并级
+//     <dataDir>/Users/<家目录名>_trash/<trashID>（家目录名=user_<账户>_<用户id>）；
 //   - 无家目录（家目录机制引入前的存量遗留用户等）→ 回退中央 trashDir/u<userID>/<trashID>。
 // 超过 trashRetentionDays（默认 30 天）的条目由后台 Cleaner 自动清理（需求4）。
-// trash_items 行不存实体路径，故还原/删除按"家目录优先、中央兜底"双候选解析，
-// 遗留中央 blob 无需搬移即可继续还原（无 schema 变更）。
+// trash_items 行不存实体路径，故还原/删除按候选序解析（新并级 → 迁移中间态
+// 内嵌 .fmtrash → 旧布局名内嵌 .fmtrash → 中央遗留），布局迁移中断窗口内
+// 条目仍可还原/彻底删除（无 schema 变更）。
 
 // homeOf 用户的家目录分配（_users 条目 SubPath）；无家目录返回 ""。
 func (s *Server) homeOf(u *store.User) string {
@@ -33,30 +35,33 @@ func (s *Server) homeOf(u *store.User) string {
 	return ""
 }
 
-// trashBlobPath 新入回收站实体的路径（家目录优先）。
+// trashBlobPath 新入回收站实体的路径（并级 _trash，家目录优先）。
 func (s *Server) trashBlobPath(u *store.User, trashID string) string {
 	if home := s.homeOf(u); home != "" {
-		return fileops.HomeTrashPath(s.Cfg.UsersDir(), home, trashID)
+		return fileops.UserTrashPath(s.Cfg.UsersDir(), home, trashID)
 	}
 	return fileops.TrashPath(s.Cfg.TrashDir, u.ID, trashID)
 }
 
-// resolveTrashBlob 还原用：家目录候选存在则用之，否则中央遗留路径。
+// resolveTrashBlob 还原用：候选路径取首个存在者，全部不存在回退中央遗留路径
+// （中央命中旧条目；返回不存在路径由 MovePath 报 ErrNotExist 走既有失败链）。
 func (s *Server) resolveTrashBlob(u *store.User, trashID string) string {
 	if home := s.homeOf(u); home != "" {
-		p := fileops.HomeTrashPath(s.Cfg.UsersDir(), home, trashID)
-		if _, err := os.Stat(p); err == nil {
-			return p
+		for _, p := range fileops.TrashBlobCandidates(s.Cfg.UsersDir(), home, &u.Username, trashID) {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
 		}
 	}
 	return fileops.TrashPath(s.Cfg.TrashDir, u.ID, trashID)
 }
 
-// trashBlobCandidates 彻底删除时清理的两候选路径。
+// trashBlobCandidates 彻底删除时清理的全部候选路径（家目录候选 + 中央）。
 func (s *Server) trashBlobCandidates(u *store.User, trashID string) []string {
 	out := []string{fileops.TrashPath(s.Cfg.TrashDir, u.ID, trashID)}
 	if home := s.homeOf(u); home != "" {
-		out = append([]string{fileops.HomeTrashPath(s.Cfg.UsersDir(), home, trashID)}, out...)
+		cands := fileops.TrashBlobCandidates(s.Cfg.UsersDir(), home, &u.Username, trashID)
+		out = append(cands, out...)
 	}
 	return out
 }

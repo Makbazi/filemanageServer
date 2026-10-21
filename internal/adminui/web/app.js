@@ -2,18 +2,38 @@
  * FileManage 管理台 —— 前端逻辑（原生 JS，无任何依赖）
  * 页面经 go:embed 打包后由 /admin/ 伺服：
  *   - API 统一以 /api/v1 为前缀，同源调用；
- *   - token 存 localStorage（键 fm_admin_token），除登录外
- *     所有请求携带 Authorization: Bearer <token>；
- *   - 任意请求 401 时自动清 token 回到登录页。
+ *   - 0.2.12 BFF + Cookie Session：登录态由服务端下发 **HttpOnly**
+ *     fm_admin Cookie（SameSite=Strict，JS 不可读不落地）；浏览器同源请求
+ *     自动携带；一切非 GET 请求必须带 X-FM-CSRF: 1 头（服务端 adminCsrf
+ *     屏障，防跨站伪造）。前端不再保存/持有任何凭证；
+ *   - 任意请求 401 时自动回到登录页（Cookie 由服务端过期/撤销管理）。
  * ========================================================= */
 "use strict";
 
 /* ---------- 一、常量与全局状态 ---------- */
-const TOKEN_KEY = "fm_admin_token"; // token 的 localStorage 键名（需求约定）
-const USER_KEY = "fm_admin_user";   // 当前登录管理员信息缓存键
-const API_BASE = "/api/v1";         // API 统一前缀
+const USER_KEY = "fm_admin_user";   // 当前登录管理员信息缓存键（仅显示用，非凭证）
+const API_BASE = "/api/v1";         // 管理 API 统一前缀（/api/v1/admin/*）
+// 0.2.11 端口彻底拆分：本控制台只调用管理端口专属端点（登录/ACL 写/分享写
+// 均为 /admin/ 下独立端点），不再复用用户端口业务 API。
+const ADMIN_API = "/api/v1/admin";  // 管理专属前缀
 
-let token = "";            // Bearer token
+// 分享链接的用户端口完整 URL（/s/:token 只在用户端口注册）：
+// scheme 取 /admin/info 的 tlsEnabled，主机取本机 location.hostname，端口从
+// listen（如 "0.0.0.0:8484"）解析；listen 为具体主机地址时优先采用。
+function userPortBase() {
+  const info = serverInfo || {};
+  const scheme = info.tlsEnabled ? "https" : "http";
+  const listen = String(info.listen || "");
+  let hostPart = listen, port = "";
+  const i = listen.lastIndexOf(":");
+  if (i >= 0) { hostPart = listen.slice(0, i); port = listen.slice(i + 1); }
+  if (!hostPart || hostPart === "0.0.0.0" || hostPart === "::" || hostPart === "[::]" || hostPart === "*") {
+    hostPart = location.hostname;
+  }
+  return port ? `${scheme}://${hostPart}:${port}` : `${scheme}://${hostPart}`;
+}
+
+let session = false;       // 0.2.12 BFF：登录态标记（凭证在 HttpOnly Cookie，前端不持有）
 let currentUser = null;    // {id, username, role}
 let serverInfo = null;     // GET /admin/info 缓存（roots 等）
 let usersCache = [];       // 用户列表缓存（用户组/ACL 主体下拉用）
@@ -102,10 +122,12 @@ function toast(msg, ok = true) {
 
 /* ---------- 四、API 封装 ----------
  * 统一 JSON 序列化；非 2xx 读取 {error} 弹红色提示条后 throw；
- * 401 → 清除 token 并回到登录页。 */
+ * 401 → 清除本地登录态并回到登录页。
+ * 0.2.12 BFF：同源 fetch 自动携带 HttpOnly Cookie（credentials 默认
+ * same-origin）；每个请求带 X-FM-CSRF: 1（adminCsrf 屏障要求非 GET 必带，
+ * GET 带上无害）。 */
 async function api(path, { method = "GET", body } = {}) {
-  const headers = {};
-  if (token) headers["Authorization"] = "Bearer " + token;
+  const headers = { "X-FM-CSRF": "1" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   let resp;
   try {
@@ -120,7 +142,7 @@ async function api(path, { method = "GET", body } = {}) {
   if (!resp.ok) {
     const msg = (data && (data.error || data.message)) || `请求失败（HTTP ${resp.status}）`;
     if (resp.status === 401) {
-      forceLogout(); // 登录失效：清 token 回登录页
+      forceLogout(); // 登录失效：回登录页（Cookie 由服务端过期/撤销）
       toast(msg.startsWith("请求失败") ? "登录已失效，请重新登录" : msg, false);
     } else {
       toast(msg, false);
@@ -165,11 +187,12 @@ function closeModal() {
 function showLogin() { $("#admin-view").classList.add("hidden"); $("#login-view").classList.remove("hidden"); }
 function showAdmin() { $("#login-view").classList.add("hidden"); $("#admin-view").classList.remove("hidden"); }
 
-// 清除本地登录态（401 或主动退出时调用），并回到登录页
+// 清除本地视图状态（401 或主动退出时调用），并回到登录页。
+// 0.2.12 BFF：凭证在 HttpOnly Cookie 前端不可读；服务端撤销走 /admin/logout，
+// 401 场景（过期/纪元推进）会话已被服务端侧作废，本地只需清 UI 缓存。
 function forceLogout() {
-  token = ""; currentUser = null; serverInfo = null;
+  session = false; currentUser = null; serverInfo = null;
   usersCache = []; groupsCache = [];
-  localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
   closeModal();
   showLogin();
@@ -185,24 +208,47 @@ async function handleLogin(ev) {
   btn.disabled = true;
   btn.textContent = "登录中…";
   try {
-    const data = await api(API_BASE + "/auth/login", { method: "POST", body: { username, password } });
-    // 非 admin 角色即使登录成功也拒绝进入管理台
+    const data = await api(ADMIN_API + "/login", { method: "POST", body: { username, password } });
+    // 非 admin 角色即使登录成功也拒绝进入管理台（普通账户走客户端，服务端同样 403）
     if (!data || !data.user || data.user.role !== "admin") { toast("需要管理员权限", false); return; }
-    token = data.token;
+    // 0.2.12 BFF：登录凭证在响应 Set-Cookie（HttpOnly）——前端不保存 data.token，
+    // 仅缓存展示用的 user 概要。
+    session = true;
     currentUser = data.user;
-    localStorage.setItem(TOKEN_KEY, token);
     localStorage.setItem(USER_KEY, JSON.stringify(currentUser));
     $("#login-password").value = "";
     enterAdmin();
-    toast(`欢迎回来，${currentUser.username}`);
+    toast(`欢迎回来，${currentUser.nickname || currentUser.username}`);
   } catch (e) { /* 错误信息已由 api() 弹提示条 */ }
   finally { btn.disabled = false; btn.textContent = "登 录"; }
+}
+
+// restoreSession 0.2.12 BFF：静默探测 Cookie 会话（不经 api() 以免 401 弹
+// 提示条）——200 即进入管理台；否则停在登录页并探测降级引导提示（0.1.0）。
+async function restoreSession() {
+  try {
+    const resp = await fetch(ADMIN_API + "/info", { headers: { "X-FM-CSRF": "1" } });
+    if (resp.ok) {
+      const info = await resp.json();
+      serverInfo = null; // 缓存留给 ensureInfo 统一填充（字段一致）
+      if (!currentUser || currentUser.role !== "admin") {
+        // 本地显示缓存缺失/过期：info 不含身份，重登一次最稳妥
+        currentUser = { username: "?", role: "admin", id: -1 };
+      }
+      session = true;
+      enterAdmin();
+      if (currentUser.id === -1) { toast("登录态有效；请退出后重新登录以恢复账户信息显示", false); }
+      return;
+    }
+  } catch (e) { /* 视为未登录 */ }
+  forceLogout();
+  updateLoginView();
 }
 
 // 进入管理台：填充顶栏并默认打开"概览"
 function enterAdmin() {
   $("#current-user").textContent = currentUser
-    ? `${currentUser.username}（${currentUser.super ? "超级管理员" : "管理员"}）` : "";
+    ? `${currentUser.nickname || currentUser.username}（${currentUser.super ? "超级管理员" : "管理员"}）` : "";
   showAdmin();
   refreshTabAccess(); // 0.1.0 需求33：降级模式页签收敛为 概览/超级管理员/数据库
   switchTab("overview");
@@ -306,15 +352,23 @@ function rootsHTML(rs) {
 
 function renderUsers() {
   const tbody = $("#users-tbody");
-  if (!usersCache.length) { tbody.innerHTML = emptyRow(6); tbody.onclick = null; return; }
+  if (!usersCache.length) { tbody.innerHTML = emptyRow(8); tbody.onclick = null; return; }
   tbody.innerHTML = usersCache.map((u) => {
     const isSelf = currentUser && String(u.id) === String(currentUser.id);
     // 需求33：管理员账户（非超管）对普通管理员只读——编辑/删除禁用（服务端同样 403）
     const adminLocked = u.role === "admin" && !isSuper();
     const lockTitle = adminLocked ? ' disabled title="只有超级管理员可以管理管理员账户"' : "";
+    // 0.2.12：邮箱+二验列（email 徽章含验证状态；mfa 徽章 off/totp/email）
+    const mfaBadge = u.role === "admin" ? '<span class="badge gray">—（管理台）</span>' :
+      (u.mfa === "totp" ? '<span class="badge green">TOTP</span>' :
+        u.mfa === "email" ? '<span class="badge green">邮箱验证码</span>' :
+          '<span class="badge gray">未启用</span>');
+    const emailTxt = u.email ? esc(u.email) + (u.emailVerified ? ' <span class="badge green">已验证</span>' : ' <span class="badge yellow">未验证</span>') : '<span class="muted">（未填）</span>';
     return `<tr>
       <td class="mono">${esc(u.id)}</td>
       <td>${esc(u.username)}${isSelf ? ' <span class="badge blue">我</span>' : ""}</td>
+      <td>${u.nickname ? esc(u.nickname) : '<span class="muted">（未设置）</span>'}</td>
+      <td><div class="small">${emailTxt}</div><div class="small" style="margin-top:2px">${mfaBadge}</div></td>
       <td>${u.role === "admin" ? '<span class="badge purple">管理员</span>' : '<span class="badge gray">普通用户</span>'}</td>
       <td>${rootsHTML(u.userRoots)}</td>
       <td class="muted">${fmtTime(u.createdAt)}</td>
@@ -331,7 +385,7 @@ function renderUsers() {
     const u = usersCache.find((x) => String(x.id) === btn.dataset.id);
     if (!u) return;
     if (btn.dataset.act === "edit") { openUserModal(u); return; }
-    if (!confirm(`确定删除用户「${u.username}」吗？此操作不可恢复。`)) return;
+    if (!confirm(`确定删除账户「${u.username}」吗？此操作不可恢复。\n其家目录与回收站目录将以孤儿目录保留在 Users/ 下（不自动删除，同名重建不会复用旧目录），如需清理请手动删除磁盘目录。`)) return;
     try {
       await api(`${API_BASE}/admin/users/${encodeURIComponent(u.id)}`, { method: "DELETE" });
       toast("用户已删除");
@@ -355,9 +409,12 @@ function openUserModal(user) {
   let pickErr = "";
 
   openModal(editing ? "编辑用户" : "新建用户", `
-    <div class="form-item"><label>用户名</label>
+    <div class="form-item"><label>账户</label>
       <input id="um-username" type="text" value="${esc(user ? user.username : "")}"
-        placeholder="登录用户名" ${editing ? "disabled" : ""} autocomplete="off"></div>
+        placeholder="登录账户（唯一、不可修改）" ${editing ? "disabled" : ""} autocomplete="off"></div>
+    <div class="form-item"><label>昵称 <span class="muted">（可修改、可重复，登录后显示；留空则显示账户名）</span></label>
+      <input id="um-nickname" type="text" value="${esc(user && user.nickname ? user.nickname : "")}"
+        placeholder="展示用昵称" autocomplete="off" maxlength="64"></div>
     <div class="form-item"><label>${editing ? "新密码" : "密码"}</label>
       <input id="um-password" type="password" autocomplete="new-password"
         placeholder="${editing ? "留空表示不修改密码" : "登录密码"}"></div>
@@ -366,6 +423,18 @@ function openUserModal(user) {
         <option value="user" ${!user || user.role === "user" ? "selected" : ""}>普通用户</option>
         ${isSuper() ? `<option value="admin" ${user && user.role === "admin" ? "selected" : ""}>管理员</option>` : ""}
       </select></div>
+    ${editing && user.role !== "admin" ? `
+    <div class="form-item"><label>邮箱 <span class="muted">（非必须；管理员填写仅作登记，**不**自动标记已验证——验证须由用户在客户端自助完成。修改邮箱会使既有验证态失效）</span></label>
+      <input id="um-email" type="email" value="${esc(user.email || "")}" placeholder="user@example.com（留空=清除）" autocomplete="off" maxlength="320"></div>
+    <div class="form-item"><label>二次验证 <span class="muted">（默认不使用；totp=验证器 App（用户下次登录页现场扫码前录入密钥）、email=邮箱验证码（需用户已绑定验证邮箱）；重置=清密钥并关闭，用于丢失验证器场景。策略变更会强制该用户重新登录）</span></label>
+      <select id="um-mfa">
+        <option value="">（不改动）</option>
+        <option value="keep_off" ${!user.mfa ? "selected" : ""}>当前：${user.mfa === "totp" ? "验证器 TOTP" : user.mfa === "email" ? "邮箱验证码" : "未启用"}</option>
+        <option value="totp">强制启用验证器（TOTP）</option>
+        <option value="email">强制启用邮箱验证码</option>
+        <option value="off">关闭二次验证</option>
+        <option value="reset">重置（清密钥+关闭）</option>
+      </select></div>` : ""}
     <div class="form-item"><label>分配目录 <span class="muted">（用户只能看到并管理下列目录；子目录留空 = 整个根目录。未分配 = 用户端口不可见；管理员用户端口同样只看到自己的分配，物理根浏览仅限本管理台）</span></label>
       <div id="um-jails"></div>
       <button type="button" class="btn sm ghost" id="um-addjail">＋ 添加目录分配</button></div>`,
@@ -443,19 +512,29 @@ function openUserModal(user) {
 
   async function save() {
     const password = $("#um-password").value;
+    const nickname = $("#um-nickname").value.trim();
     const role = $("#um-role").value;
     const jailBody = { roots: jailRows.filter((r) => r.rootId).map((r) => ({ rootId: r.rootId, subPath: r.subPath, alias: r.alias })) };
     try {
       let id;
       if (editing) {
-        const body = { role };                       // password 留空 = 不修改
+        const body = { role, nickname };             // password 留空 = 不修改；昵称总提交（空串=清除）
         if (password) body.password = password;
+        // 0.2.12：邮箱（仅普通用户行存在该输入）——变更即清验证态（服务端判）
+        const emailEl = $("#um-email");
+        if (emailEl) { const ev = emailEl.value.trim(); if (ev !== (user.email || "")) body.email = ev; }
         await api(`${API_BASE}/admin/users/${encodeURIComponent(user.id)}`, { method: "PUT", body });
         id = user.id;
+        // 二验治理：独立端点（策略变更强制该用户重登）；"（不改动）"与"当前"不发请求
+        const mfaEl = $("#um-mfa");
+        const mfaVal = mfaEl ? mfaEl.value : "";
+        if (mfaVal && mfaVal !== "keep_off") {
+          await api(`${API_BASE}/admin/users/${encodeURIComponent(user.id)}/mfa`, { method: "PUT", body: { method: mfaVal } });
+        }
       } else {
         const username = $("#um-username").value.trim();
-        if (!username || !password) { toast("请输入用户名和密码", false); return; }
-        const created = await api(API_BASE + "/admin/users", { method: "POST", body: { username, password, role } });
+        if (!username || !password) { toast("请输入账户和密码", false); return; }
+        const created = await api(API_BASE + "/admin/users", { method: "POST", body: { username, nickname, password, role } });
         id = created && created.id;
       }
       if (id) await api(`${API_BASE}/admin/users/${encodeURIComponent(id)}/roots`, { method: "PUT", body: jailBody });
@@ -720,10 +799,11 @@ function bindAclEditorEvents() {
   });
 }
 
-// 保存：PUT /api/v1/acl，整体替换该路径的条目
+// 保存：PUT /api/v1/admin/acl（0.2.11 管理专属端点），整体替换该路径的条目
+// （物理键直存——管理台读 /admin/acls 本就以物理键工作）
 async function saveAcl() {
   try {
-    await api(API_BASE + "/acl", { method: "PUT", body: {
+    await api(ADMIN_API + "/acl", { method: "PUT", body: {
       rootId: aclEditor.rootId, path: aclEditor.path,
       entries: aclEditor.entries.map((e) => ({ subjectType: e.subjectType, subjectId: e.subjectId, perms: e.perms })),
     } });
@@ -755,7 +835,7 @@ function renderLinks(links) {
   const tbody = $("#links-tbody");
   if (!links.length) { tbody.innerHTML = emptyRow(6); tbody.onclick = null; return; }
   tbody.innerHTML = links.map((l) => {
-    const fullUrl = `${location.origin}/s/${l.token}`; // 完整 URL 用 location.origin 拼接
+    const fullUrl = `${userPortBase()}/s/${l.token}`; // 0.2.11：/s/ 只在用户端口——按 listen 构造
     return `<tr>
       <td><span class="link-cell"><code class="mono">/s/${esc(l.token)}</code>
         <button type="button" class="btn sm ghost" data-act="copy" data-url="${esc(fullUrl)}">复制</button></span></td>
@@ -778,7 +858,7 @@ function renderLinks(links) {
     if (btn.dataset.act === "edit") { openLinkEditor(link); return; }
     if (!confirm(`确定删除分享链接 /s/${link.token} 吗？删除后立即失效。`)) return;
     try {
-      await api(`${API_BASE}/share/links/${encodeURIComponent(link.token)}`, { method: "DELETE" });
+      await api(`${ADMIN_API}/links/${encodeURIComponent(link.token)}`, { method: "DELETE" });
       toast("链接已删除");
       loadLinks();
     } catch (e) { /* 已弹提示 */ }
@@ -821,7 +901,7 @@ function openLinkEditor(link) {
     }
     body.disabled = $("#le-disabled").checked;
     try {
-      await api(`${API_BASE}/share/links/${encodeURIComponent(link.token)}`, { method: "PUT", body });
+      await api(`${ADMIN_API}/links/${encodeURIComponent(link.token)}`, { method: "PUT", body });
       toast("链接已更新");
       closeModal();
       loadLinks();
@@ -876,7 +956,7 @@ function openNewLink() {
       }
     }
     try {
-      const res = await api(API_BASE + "/share/links", { method: "POST", body });
+      const res = await api(ADMIN_API + "/links", { method: "POST", body });
       closeModal();
       showLinkCreated(res || {});
       loadLinks();
@@ -886,7 +966,7 @@ function openNewLink() {
 
 // 创建成功：醒目模态框展示完整 URL + 明文密码（仅此一次）
 function showLinkCreated(res) {
-  const fullUrl = res.url && /^https?:\/\//i.test(res.url) ? res.url : `${location.origin}/s/${res.token || ""}`;
+  const fullUrl = res.url && /^https?:\/\//i.test(res.url) ? res.url : `${userPortBase()}/s/${res.token || ""}`;
   openModal("✅ 链接创建成功", `
     <div class="created-box">
       ${res.password ? '<p class="warn-text">⚠️ 密码明文仅此一次展示，关闭后无法再次查看，请立即保存！</p>' : ""}
@@ -952,8 +1032,7 @@ let dbStatusDegraded = false; // 最近一次探测的降级状态（refreshTabA
 // 管理员；X-DB-Unlock 解锁头随 firstBoot 流程移除）。与 api() 的区别：
 // 401 仅在已有 token 时登出（status 探测在未登录状态也会调用）；409 交给调用方处理。
 async function dbApi(path, { method = "GET", body } = {}) {
-  const headers = {};
-  if (token) headers["Authorization"] = "Bearer " + token;
+  const headers = { "X-FM-CSRF": "1" }; // 0.2.12 adminCsrf：非 GET 必带（GET 无害）
   if (body !== undefined) headers["Content-Type"] = "application/json";
   let resp;
   try {
@@ -966,7 +1045,7 @@ async function dbApi(path, { method = "GET", body } = {}) {
   if (text) { try { data = JSON.parse(text); } catch (e) { /* 忽略 */ } }
   if (!resp.ok) {
     const msg = (data && (data.error || data.message)) || `请求失败（HTTP ${resp.status}）`;
-    if (resp.status === 401 && token) forceLogout();
+    if (resp.status === 401 && session) forceLogout();
     else toast(msg, false);
     const err = new Error(msg); err.status = resp.status; err.data = data;
     throw err;
@@ -1073,10 +1152,10 @@ async function dbConnect() {
     $("#db-force-chk").checked = false;
     // 会话校验（0.1.0 需求33）：超管令牌走账户文件纪元、不随库失效；
     // 数据库管理员的会话存在旧库——未迁移时其登录态作废。
-    if (token && currentUser && !currentUser.super && (res.degraded || !res.migrated)) forceLogout();
+    if (session && currentUser && !currentUser.super && (res.degraded || !res.migrated)) forceLogout();
     await loadDbTab();
     await refreshTabAccess(); // 配库后页签可见性联动
-    if (!token) await updateLoginView();
+    if (!session) await updateLoginView();
   } catch (e) {
     if (e.status === 409) {
       $("#db-force-row").classList.remove("hidden");
@@ -1165,10 +1244,8 @@ async function saveSuper() {
   if (!body.username && !body.password) { toast("没有需要保存的修改", false); return; }
   try {
     const res = await api(API_BASE + "/admin/super", { method: "PUT", body });
-    if (res.token) { // 纪元已推进：换用服务端重发的新令牌，避免自踢下线
-      token = res.token;
+    if (res.token) { // 0.2.12 BFF：纪元推进后服务端已把新凭证 Set-Cookie 回写——本地只更新展示
       currentUser = { ...(currentUser || {}), username: res.username, super: true };
-      localStorage.setItem(TOKEN_KEY, token);
       localStorage.setItem(USER_KEY, JSON.stringify(currentUser));
       $("#current-user").textContent = `${res.username}（超级管理员）`;
     }
@@ -1180,16 +1257,19 @@ async function saveSuper() {
 
 /* ---------- 十四、初始化 ---------- */
 function init() {
-  // 恢复登录态：token + 管理员信息都有本地缓存才自动进入
-  token = localStorage.getItem(TOKEN_KEY) || "";
+  // 0.2.12 BFF：登录态=服务端 HttpOnly Cookie——启动时用一次静默探测恢复
+  // （GET /admin/info 带 Cookie：200 → 直接进入；401 → 停在登录页）。
+  // USER_KEY 缓存仅用于顶栏显示，不作为登录判据。
   try { currentUser = JSON.parse(localStorage.getItem(USER_KEY) || "null"); }
   catch (e) { currentUser = null; }
-  if (token && currentUser && currentUser.role === "admin") enterAdmin();
-  else { forceLogout(); updateLoginView(); } // 停在登录页并探测降级引导提示（0.1.0）
+  restoreSession();
 
   // 登录 / 退出
   $("#login-form").addEventListener("submit", handleLogin);
-  $("#logout-btn").addEventListener("click", () => { forceLogout(); updateLoginView(); toast("已退出登录"); });
+  $("#logout-btn").addEventListener("click", async () => {
+    try { await api(ADMIN_API + "/logout", { method: "POST", body: {} }); } catch (e) { /* 尽力而为 */ }
+    forceLogout(); updateLoginView(); toast("已退出登录");
+  });
 
   // 数据库 tab（0.1.0：解锁/引导注册已移除，登录态统一走超管/DB 管理员）
   $("#db-refresh-btn").addEventListener("click", loadDbTab);

@@ -195,8 +195,172 @@ func (s *sqlStore) UpdateUserRoots(id int64, roots []string) error {
 	return affectedG(s.db.Model(&userRow{}).Where("id = ?", id).Update("allowed_roots", r.AllowedRoots))
 }
 
+func (s *sqlStore) UpdateUserNickname(id int64, nickname string) error {
+	return affectedG(s.db.Model(&userRow{}).Where("id = ?", id).Update("nickname", nickname))
+}
+
+// UpdateUserAuth（0.2.12）：邮箱+二次验证四列全量写入（map 式 Updates——
+// 空串/零值列不被跳过；password_hash 绝不触碰）。
+func (s *sqlStore) UpdateUserAuth(id int64, email string, emailVerified bool, mfaMethod, mfaSecret string) error {
+	return affectedG(s.db.Model(&userRow{}).Where("id = ?", id).
+		Updates(map[string]any{"email": email, "email_verified": b2i(emailVerified),
+			"mfa_method": mfaMethod, "mfa_secret": mfaSecret}))
+}
+
 func (s *sqlStore) UpdateUserRole(id int64, role string) error {
 	return affectedG(s.db.Model(&userRow{}).Where("id = ?", id).Update("role", role))
+}
+
+// rewriteSub 前缀改写命中判据（Go 侧过滤，避免方言间 LIKE 转义/大小写规则差异；
+// 0.2.11 布局迁移为启动一次性操作，按根取行规模可控）。
+func rewriteSub(path, oldPrefix string) bool {
+	return path == oldPrefix || strings.HasPrefix(path, oldPrefix+"/")
+}
+
+// RewritePhysicalPath 见接口注释（0.2.11）。七表逐一"取 id+路径列→Go 判前缀→
+// 按主键回写"，单事务；不触磁盘（实体搬移由 fileops 迁移器负责）。
+func (s *sqlStore) RewritePhysicalPath(rootID, oldPrefix, newPrefix string) (int64, error) {
+	if oldPrefix == "" || oldPrefix == newPrefix {
+		return 0, nil
+	}
+	var total int64
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		{ // file_metas
+			var hits []struct {
+				ID   int64
+				Path string
+			}
+			if err := tx.Model(&fileMetaRow{}).Where("root_id = ?", rootID).Select("id", "path").Find(&hits).Error; err != nil {
+				return err
+			}
+			for _, h := range hits {
+				if !rewriteSub(h.Path, oldPrefix) {
+					continue
+				}
+				np := newPrefix + strings.TrimPrefix(h.Path, oldPrefix)
+				if err := tx.Model(&fileMetaRow{}).Where("id = ?", h.ID).Update("path", np).Error; err != nil {
+					return err
+				}
+				total++
+			}
+		}
+		{ // ai_descriptions
+			var hits []struct {
+				ID   int64
+				Path string
+			}
+			if err := tx.Model(&aiDescRow{}).Where("root_id = ?", rootID).Select("id", "path").Find(&hits).Error; err != nil {
+				return err
+			}
+			for _, h := range hits {
+				if !rewriteSub(h.Path, oldPrefix) {
+					continue
+				}
+				np := newPrefix + strings.TrimPrefix(h.Path, oldPrefix)
+				if err := tx.Model(&aiDescRow{}).Where("id = ?", h.ID).Update("path", np).Error; err != nil {
+					return err
+				}
+				total++
+			}
+		}
+		{ // trash_items（rel_path 列）
+			var hits []struct {
+				ID      int64
+				RelPath string
+			}
+			if err := tx.Model(&trashRow{}).Where("root_id = ?", rootID).Select("id", "rel_path").Find(&hits).Error; err != nil {
+				return err
+			}
+			for _, h := range hits {
+				if !rewriteSub(h.RelPath, oldPrefix) {
+					continue
+				}
+				np := newPrefix + strings.TrimPrefix(h.RelPath, oldPrefix)
+				if err := tx.Model(&trashRow{}).Where("id = ?", h.ID).Update("rel_path", np).Error; err != nil {
+					return err
+				}
+				total++
+			}
+		}
+		{ // folder_acls
+			var hits []struct {
+				ID   int64
+				Path string
+			}
+			if err := tx.Model(&aclRow{}).Where("root_id = ?", rootID).Select("id", "path").Find(&hits).Error; err != nil {
+				return err
+			}
+			for _, h := range hits {
+				if !rewriteSub(h.Path, oldPrefix) {
+					continue
+				}
+				np := newPrefix + strings.TrimPrefix(h.Path, oldPrefix)
+				if err := tx.Model(&aclRow{}).Where("id = ?", h.ID).Update("path", np).Error; err != nil {
+					return err
+				}
+				total++
+			}
+		}
+		{ // share_links
+			var hits []struct {
+				ID   int64
+				Path string
+			}
+			if err := tx.Model(&shareRow{}).Where("root_id = ?", rootID).Select("id", "path").Find(&hits).Error; err != nil {
+				return err
+			}
+			for _, h := range hits {
+				if !rewriteSub(h.Path, oldPrefix) {
+					continue
+				}
+				np := newPrefix + strings.TrimPrefix(h.Path, oldPrefix)
+				if err := tx.Model(&shareRow{}).Where("id = ?", h.ID).Update("path", np).Error; err != nil {
+					return err
+				}
+				total++
+			}
+		}
+		{ // file_versions
+			var hits []struct {
+				ID   int64
+				Path string
+			}
+			if err := tx.Model(&versionRow{}).Where("root_id = ?", rootID).Select("id", "path").Find(&hits).Error; err != nil {
+				return err
+			}
+			for _, h := range hits {
+				if !rewriteSub(h.Path, oldPrefix) {
+					continue
+				}
+				np := newPrefix + strings.TrimPrefix(h.Path, oldPrefix)
+				if err := tx.Model(&versionRow{}).Where("id = ?", h.ID).Update("path", np).Error; err != nil {
+					return err
+				}
+				total++
+			}
+		}
+		{ // upload_sessions（TEXT 主键）
+			var hits []struct {
+				ID   string
+				Path string
+			}
+			if err := tx.Model(&uploadRow{}).Where("root_id = ?", rootID).Select("id", "path").Find(&hits).Error; err != nil {
+				return err
+			}
+			for _, h := range hits {
+				if !rewriteSub(h.Path, oldPrefix) {
+					continue
+				}
+				np := newPrefix + strings.TrimPrefix(h.Path, oldPrefix)
+				if err := tx.Model(&uploadRow{}).Where("id = ?", h.ID).Update("path", np).Error; err != nil {
+					return err
+				}
+				total++
+			}
+		}
+		return nil
+	})
+	return total, mapErr(err)
 }
 
 // DeleteUser 级联清理用户的全部关联数据（单事务，按固定顺序级联删除）。
@@ -808,6 +972,13 @@ func (s *sqlStore) GetAuthSessionByTokenHash(tokenHash string) (*AuthSession, er
 func (s *sqlStore) RenewAuthSession(id int64, expiresAt, lastUsedAt time.Time) error {
 	return affectedG(s.db.Model(&authSessionRow{}).Where("id = ?", id).
 		Updates(map[string]any{"expires_at": expiresAt, "last_used_at": lastUsedAt}))
+}
+
+// UpdateAuthSessionFlow（0.2.12）：按主键改写协议状态 JSON；RowsAffected=0 →
+// ErrNotFound（条目已被消费/吊销，调用方据此中止流程——与 Renew 同竞态判据）。
+func (s *sqlStore) UpdateAuthSessionFlow(id int64, flowData string) error {
+	return affectedG(s.db.Model(&authSessionRow{}).Where("id = ?", id).
+		Updates(map[string]any{"flow_data": flowData}))
 }
 
 func (s *sqlStore) DeleteAuthSessionByTokenHash(tokenHash string) error {

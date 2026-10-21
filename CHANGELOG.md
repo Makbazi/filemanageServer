@@ -10,7 +10,9 @@
 
 | filemanageServer | 元数据存储 | 兼容 filemanageClient |
 |---|---|---|
-| 0.2.x（当前 **0.2.9**；0.2.9=版本号对齐批——代码/协议/配置 schema/Store/go.mod 零变更，配套 Client 0.3.9 修复批，推荐位见下行） | 自含（同 0.2.4；0.2.8 上传限额默认值放宽：`maxUploadBytes` 默认 2GiB→**0=不限**（migrate11to12 恰好等于历代默认字面量 2147483648 的配置升为 0，用户显式自定义限额原样保留；schemaVersion 11→12；无新表/新列/新端点，go.mod 零变更）；0.2.7 服务端日志（log 段，schema 10→11）与 0.2.4 认证收敛、0.2.3 auth_sessions/去 JWT 沿用） | **`/api/v1` 数据协议零变更、响应形状零变更**——0.2.8 仅默认限额值变化（`POST /upload/session` 的 413 判定从"默认必现"变为"仅显式配置限额时"），兼容 Client 0.1.x–**0.3.8** 全系列一切历代版本；推荐基线为 **Client 0.3.8**（本批配套定版：大文件上传恢复+客户端 413 中文指引；0.3.6 起认证收敛语义全保留、0.3.7 起转码/恢复/渲染/批量/设置能力对协议零依赖）。旧客户端 0.1.x–0.3.5 与移动端**可用但降级**（会话未绑定不查头；refresh 401/404 退化重登；窗口同降 1h）。管理台内嵌前端兼容（保留 `{token,user}`）；`GET /thumb` JPEG/RAW 出图面 50MP/9000px 沿用|
+| **0.2.12（当前；配套 Client 0.3.13 / mobile 0.2.0；用户 2026-10-21 清单 1–6 条；OAuth2/OIDC+PKCE、二次验证、邮箱、管理台 BFF）**——认证面按推荐方案改造：用户端口新增 **OAuth 2.0 授权码+PKCE**（`/oauth/authorize` 服务端登录页、`/oauth/token` 三 grant：authorization_code/refresh_token/设备码 RFC 8628、`/oauth/revoke`、`/oauth/userinfo`、发现文档 `/.well-known/openid-configuration`；私有 IdP=本服务端自身，id_token 最小 HS256 声明回执不参与鉴权，Access Token 仍是认证图不透明随机凭证=Bearer）；**二次验证**（TOTP=RFC 6238 纯标准库 / 邮箱验证码=net-smtp；默认**不启用**、客户端自助选择性启用、管理端 `PUT /admin/users/:id/mfa` 治理）；**邮箱**为非必须配置（config 新 `mail` 段；未配置时邮箱通道明确报错、TOTP 不受影响）；**管理台改 BFF+Cookie Session**（`fm_admin` HttpOnly+SameSite=Strict、全端口非 GET 须 `X-FM-CSRF:1`、`POST /admin/logout` 新增）；`POST /auth/login` **保留**（旧客户端降级直登；已启用二验账户在此 403）。旧客户端 ≤0.3.12/旧移动端全功能无感（不调新端点即无感）；新客户端/新移动端对 ≤0.2.11 服务端自动退化直登。**破坏点**：管理台前端与内嵌台同版锁定（token localStorage 形态废除）；users 表加列 email/email_verified/mfa_method/mfa_secret、auth_sessions 加列 flow_data、auth kind 扩 flow/code/browser/refresh/device/devuser（只增不改幂等，四方言+file 全实现；Store 新方法 UpdateUserAuth/UpdateAuthSessionFlow）；config schemaVersion **12→13**（session.refreshDays=30/loginTTL=12h、mail 段、oauth 段——migrate12to13 只补缺）；`GET /auth/me` 加性 `email/emailVerified/mfa`；`PUT /admin/users/:id` 加性 `email`（变更即清验证态）；`<dataDir>/oidc.key`（0600，首用自生）入共享清单。详见 0.2.12 条目 |
+| 0.2.11（破坏批；配套 Client 0.3.12）——端口彻底拆分（管理端口不再注册用户 API，专属 `/admin/login`、`PUT /admin/acl`、`/admin/links` CRUD）+ 账户/昵称/用户 id 三分离（users 加列 nickname；家目录 `user_<账户>_<用户id>`、回收站并级 `<目录名>_trash`；一次性布局迁移 `userhomes.v8` 含七表物理键改写）+ 用户端口数字用户 id 全隐藏（/auth/me 加 nickname、新增 PUT /auth/profile、/acl/subjects 与 ACL 条目账户化、/versions /ai /share 响应视图化）+ 超管建分享 410 潜在 bug 修复 + 暂停期管理台可登录 | 自含（0.2.11 users 加列 `nickname` 只增不改——四方言 CREATE 含列 + extra 幂等加列守卫（sqlite PRAGMA/mysql information_schema/pg IF NOT EXISTS）、file 驱动 JSON 加性；Store 接口新增 `UpdateUserNickname`/`RewritePhysicalPath` 两方法（sqlStore/fileStore/proxy/cache 全实现）；config schemaVersion **保持 12**（无配置结构变更）；布局迁移标记 `userhomes.v8`（启动与热切换双站点，磁盘先改名后写库、可重入）） | **推荐 Client 0.3.12**。用户端口破坏点：`/acl/subjects` 不再含数字 id/role/members、ACL 条目响应改 `subject:"user:<账户>"`（PUT 入参兼容旧数字 subjectId）、`/versions` 不再转储 store 行（物理 rootId/path/storeId/createdBy 移除）、share `linkView` 去 `createdBy`、`/ai/*` 响应视图化（去 userId/物理键）。**登录请求/响应形状不变**（`{username,password,clientId?}`→`{token}`，username 语义=账户），家目录虚拟根 id `_users:<账户>` 形式升级前后字面恒效（旧基座名即账户名；新布局含 id 的目录名经逐段令牌映射不外露）。旧桌面 0.1.x–0.3.11 与移动端**可用但按需降级**（ACL 编辑/昵称功能不可用面按兼容记录适配；登录/浏览/上传下载/回收站/分享访问全兼容）。管理台内嵌前端改调用管理端口专属端点（`{token,user}` 保留并含 nickname）；`/s/:token` 仅用户端口——管理台分享 URL 按 `/admin/info` 的 listen+tlsEnabled 构造 |
+| 0.2.x（0.2.9=版本号对齐批——代码/协议/配置 schema/Store/go.mod 零变更，配套 Client 0.3.9 修复批；0.2.8 上传限额默认批；0.2.7 日志批；0.2.4 认证收敛；0.2.3 去 JWT） | 自含（同 0.2.4；0.2.8 上传限额默认值放宽：`maxUploadBytes` 默认 2GiB→**0=不限**（migrate11to12 恰好等于历代默认字面量 2147483648 的配置升为 0，用户显式自定义限额原样保留；schemaVersion 11→12；无新表/新列/新端点，go.mod 零变更）；0.2.7 服务端日志（log 段，schema 10→11）与 0.2.4 认证收敛、0.2.3 auth_sessions/去 JWT 沿用） | 承前各批对 Client 0.1.x–0.3.11 **`/api/v1` 数据协议零变更、响应形状零变更**——0.2.8 仅默认限额值变化（`POST /upload/session` 的 413 判定从"默认必现"变为"仅显式配置限额时"），兼容 Client 0.1.x–**0.3.8** 全系列一切历代版本；0.3.6 起认证收敛语义全保留、0.3.7 起转码/恢复/渲染/批量/设置能力对协议零依赖。旧客户端 0.1.x–0.3.5 与移动端**可用但降级**（会话未绑定不查头；refresh 401/404 退化重登；窗口同降 1h）。管理台内嵌前端兼容（保留 `{token,user}`）；`GET /thumb` JPEG/RAW 出图面 50MP/9000px 沿用|
 | 0.2.3 | 自含（同 0.1.x；0.2.3 认证重构：新表 `auth_sessions`（幂等增量，四方言+file 驱动）、配置 schemaVersion 8→9（auth 段）、`golang-jwt` 依赖移除；旧 `sessions` 表冻结不再读写但保留磁盘兼容） | Client 0.3.4（推荐位由 0.3.6 取代；认证协议字段形状零变更，0.1.x–0.3.4 登录/刷新/分享/管理台全链路可用）；**一次性代价**：升级到该版本时所有既有 JWT/refresh/分享 st 令牌失效，重登一次 |
 | 0.2.2 | 自含（同 0.1.x；仅 `GET /thumb` 白名单扩 BMP（thumbdec.go 纯标准库自实现），无新端点/新表/新列、schemaVersion 保持 8） | Client 0.3.3（服务端网格 BMP 出图=本地缩放机制）；Client 0.3.2/0.2.x 无感可用且 BMP 由 415 变 200 为纯增益面（旧客户端 size_hint 回退语义不变）；Client 0.1.x 及以下同 |
 | 0.2.1 | 自含（同 0.1.x；纯 API 面加性 `GET /thumb`+`POST /check` 与静默修复，无新表/新列、schemaVersion 保持 8） | **Client 0.3.2 完整功能（浏览零下载+目录重传预检依赖本版本端点）**；Client 0.2.0/0.3.x 早期版本全功能无感（不调用新端点即无感）；Client 0.1.x 及以下同 |
@@ -43,6 +45,156 @@
   版本号落到 `"unknown"`。设 `FM_VERSION=x.y.z ./build.sh -a all` 可跳过 git 推导固定版本
   （此时也不追加 `-dirty`）；亦可在流水线先 `git fetch --tags --force`（浅克隆加
   `--unshallow`）并 `git config --global --add safe.directory "$WORKSPACE"` 让 tag 真正可用。
+
+## [0.2.12] - 2026-10-21（认证批：OAuth2/OIDC 授权码+PKCE + 二次验证（TOTP/邮箱）+ 邮箱配置/绑定 + 管理台 BFF Cookie Session；用户 2026-10-21 清单 1–6 条；配套 Client 0.3.13 / filemanagemobile 0.2.0；tag 由维护者打）
+
+依据维护者提供的推荐认证方案表（Windows/Linux 桌面、Android 移动=授权码+PKCE+
+Bearer+系统安全存储；管理端 Web=OIDC+BFF+Cookie Session）落地。本服务端为**私有
+IdP/OP**（无外部认证方），凭证模型沿用 0.2.3 起的三层认证图——**Access Token 仍是
+不透明随机凭证（Bearer）**，0.2.3"凭证不编码身份"红线不破；id_token 仅为 OIDC
+协议声明回执（HS256、sub=账户名），**不参与任何鉴权路径**。
+
+### 新增：OAuth2/OIDC 面（用户端口 /api/v1，v1 维护屏障内；`internal/api/v1_oauth.go` + 内嵌登录页 `oauthpage.go`）
+- `GET /oauth/authorize`：授权端点——response_type=code、client_id 注册表校验、
+  **redirect_uri 白名单**（精确匹配 + loopback 任意端口 http 回调，RFC 8252 §7.3；
+  校验失败绝不重定向防开放重定向）、**PKCE 强制**（S256；plain 仅历史兼容）；
+  已登录浏览器（fm_browser HttpOnly Cookie，绝对 `session.loginTTL` 默认 12h）
+  静默出码 302；`prompt=login` 强制重输。
+- 登录页（服务端自渲染 HTML，无外部资源）：账密 → 按需二次验证（TOTP 动态码 /
+  邮箱验证码 / 强制开通时现场 enroll 展示密钥+otpauth——**不出二维码图**，
+  纯标准库无 QR 编码器，手工录入 otpauth 为明示形态）。中转条目 kind=flow
+  （10 分钟一次性）+ fm_flow Cookie 双承载。
+- `POST /oauth/token`：三 grant——`authorization_code`（code 60 秒一次性消费 +
+  PKCE 核对 + client 匹配）、`refresh_token`（**rotation**：旧令牌即时吊销、
+  新 access+新 refresh 成对换发；refresh 绝对 `session.refreshDays` 默认 30 天，
+  每次刷新重开窗口）、`urn:ietf:params:oauth:grant-type:device_code`。
+  响应 `{access_token, token_type:"Bearer", expires_in, refresh_token, scope, id_token}`。
+  `X-Client-Id` 安装标识绑定语义沿用 0.2.4（token 请求携带即绑定 access+refresh，
+  逐请求/刷新核对）。
+- **设备授权码流（RFC 8628，无浏览器输入端的移动/CLI 登录）**：`POST /oauth/device`
+  → device_code+user_code（XXXX-XXXX，10 分钟）；浏览器 `GET /oauth/device/input`
+  批准页（账密+二验/已登录直接批准）；设备轮询 pending/approved/denied/expired、
+  批准一次性消费双生行（kind=device/devuser 哈希互引）。
+- `POST /oauth/revoke`（RFC 7009 语义：未知一律 200）、`GET /oauth/userinfo`
+  （Bearer；sub/username/nickname/email/emailVerified/mfa）、
+  `GET /.well-known/openid-configuration`（发现文档；issuer=配置或按请求 Host 派生）。
+- id_token：最小 HS256 JWT（`internal/auth/oidc.go` 标准库手工签验，**不引回
+  golang-jwt**）；claims=iss/sub(账户)/aud(client_id)/exp/iat/auth_time/nonce/
+  preferred_username/nickname/email(_verified)/amr；签名密钥 `<dataDir>/oidc.key`
+  （0600 首用自生——多实例共享 dataDir 即共享，列入共享清单；失败只降级不发
+  id_token 不杀进程）。
+
+### 新增：二次验证与邮箱（需求2/3：**默认不使用、选择性启用、非必须配置**）
+- users 加列 `email/email_verified/mfa_method/mfa_secret`（只增不改；四方言
+  CREATE+extra 幂等加列、file JSON 加性；MfaSecret 敏感纪律同 PasswordHash——
+  json:"-"，永不出 API/日志；redis 用户影子结构补 MfaSecret 完整往返）。
+- 自助面（auth 组，`internal/api/v1_mfa.go`）：`GET /auth/mfa`（形态+mail 可用性）、
+  `POST /auth/mfa/totp/enroll|confirm`（口令复验；确认才落密钥）、
+  `POST /auth/mfa/email/send|confirm`（OTP 存 kind=flow 行 mode=emailbind、
+  5 分钟一次性；**mail 未配置回明确中文错误**）、`POST /auth/mfa/disable`
+  （口令复验+关闭=安全降级→**吊销全部会话**）。超管不经此面（账户文件，本批
+  明确不做超管二验——记录为已知边界）。
+- 管理端治理：`PUT /api/v1/admin/users/:id/mfa {method:"off"|"totp"|"email"|"reset"}`——
+  强制 totp 无密钥者下次登录页现场开通；强制 email 要求已验证邮箱；策略变更与
+  reset 一律 `RevokeUser` 强制重登；目标为管理员/超管 400（管理台登录本批不
+  走二验）。`PUT /admin/users/:id` 加性 `email`（登记不验证、变更即清验证态）。
+- TOTP=RFC 6238（HMAC-SHA1/30s/6 位/±1 步窗口，`internal/auth/totp.go` 纯标准库）；
+  邮箱 OTP 投递走 `internal/mailx`（net/smtp；465 隐式 TLS 或 587 STARTTLS，
+  **不支持 STARTTLS 拒发明文投递**）。
+- 登录强制：`POST /oauth/login` 按 `mfa_method` 分叉（totp 校验、email 发码+校验、
+  强制未开通走 enroll）；旧 `POST /auth/login` 对已启用二验账户 **403** 明确拒绝
+  （"请升级客户端走 OAuth"）——旧客户端未启用二验者行为零变化。
+
+### 变更：管理台 BFF + Cookie Session（需求表"管理端 Web"行）
+- `POST /admin/login` 成功 `Set-Cookie fm_admin`（HttpOnly/SameSite=Strict/Path=/，
+  TLS 启用加 Secure；响应 `{token,user}` 保留供程序化调用）；authCtx 管理端口无
+  Authorization 头时回退读该 Cookie（**用户端口绝不读**——admin/super 凭证在
+  用户口 403 纪律不变）；新 `POST /admin/logout`（清 Cookie+撤凭证）；
+  `PUT /admin/super` 重发凭证同步 Set-Cookie；`GET /admin/info` 加性 `who`
+  （当前管理员概要，刷新页面恢复顶栏）。
+- CSRF 屏障 `adminCsrf()`：管理端口全部非 GET 请求必须带 `X-FM-CSRF: 1`
+  （浏览器跨站表单自定义不了头 + SameSite=Strict 双保险）。
+- 内嵌控制台（go:embed 同版锁定）：localStorage token 形态**废除**；api()/dbApi()
+  带 CSRF 头 + Cookie 同源凭证；启动静默探测 `/admin/info` 恢复会话；用户页新增
+  邮箱/二验列与治理下拉；登出真调 /admin/logout。
+
+### 认证图扩 kind（Store/Center 跨工程契约变更——按需求2 三份文档同步）
+- auth_sessions 加列 `flow_data`（协议状态 JSON：PKCE challenge/redirect/nonce/
+  phase/OTP 哈希/设备互引哈希——**绝不含明文凭证**，json:"-" 不出 API）；
+  kind 扩 `flow|code|browser|refresh|device|devuser`（authCtx 身份注入只认 user，
+  其余一律 401；share 互斥门控不变）。
+- `Store` 新方法 `UpdateUserAuth`（四列全量写）+ `UpdateAuthSessionFlow`（按主键
+  推进流程态；无行→ErrNotFound=消费竞态判据）——sqlStore/fileStore/proxy/
+  cache 装饰器全实现；`auth.Center` 新增 `Spec.Plain`（user_code 直作条目凭证）、
+  `LookupHash`/`RevokeByHash`/`UpdateFlow`（三层同步）、`Spec.FlowData`；
+  L1/L2 **按用户反向索引覆盖面扩大**：非 share 全部 kind 入 byUser/`fm:auth:u:`
+  集合——**改密/删号即时吊销该用户的 flow/code/browser/refresh/device 条目**
+  （旧只清 user 行会让 ≤memTTL 窗口内的授权码继续可兑换，新语义根治）。
+- 清扫器既有回收（expires_at 索引）天然覆盖新 kind；WarmStart 一并预热。
+
+### 配置（需求25：schemaVersion 12→13）
+- `session.refreshDays`=30（刷新令牌绝对期）、`session.loginTTL`="12h"（浏览器
+  登录态）；`mail` 段（host/port/ssl/username/password/from/fromName——host 空=
+  通道关闭）；`oauth` 段（issuer 空=按请求 Host 派生；clients 空=内置注册表
+  desktop（fmmanage://oauth/callback + loopback 任意端口）/mobile
+  （filemanageauth://callback）/web）；migrate12to13 只补缺不覆盖。
+
+### 验证（需求29）
+- `go build ./... && go vet ./...` 全绿（file 驱动实机）；端到端冒烟全过：CSRF
+  拦截/管理台 Cookie 登录/info.who/建号/分配目录→发现文档→authorize 页渲染/
+  非法 redirect 400→PKCE 错 verifier 拒/对 verifier 换发全票据（id_token claims
+  正确）→X-Client-Id 绑定核对 401→授权码/flow/device_code 一次性→refresh
+  rotation 旧令牌作废→TOTP enroll/confirm→二验账户旧端点 403→OAuth mfa 链→
+  管理端 reset→强制 totp 登录页 enroll→改密 RevokeUser 清 refresh→revoke→
+  静默授权（**重启后 fm_browser 仍 302**——auth_sessions L3 持久+惰性回源）→
+  userinfo→mail 未配置错误文案→config v12 自动迁移 v13（含 .bak 备份）。
+
+### 兼容
+- **旧客户端 0.1.x–0.3.12 与旧移动端 0.1.x：全功能无感**（`POST /auth/login`/
+  logout/change-profile/roots/传输/分享/回收站零变更；不调新端点即不触新面；
+  仅当管理员给某账户开了二验后，该账户旧客户端直登被 403 明确拒绝——属二验
+  语义的必然，兼容矩阵记录）。
+- **新客户端 0.3.13/新移动端 0.2.0 对 ≤0.2.11 服务端**：发现文档 404 →自动
+  退化旧账密直登（客户端兼容策略，见各自 CHANGELOG）。
+- 升级一次性代价：无（认证图存量 user/share 条目原样有效；新列全默认值）。
+- 管理台前端与内嵌台同版锁定（go:embed），无跨版形态。
+
+## [0.2.11] - 2026-10-20（破坏批：端口 API 彻底拆分 + 账户/昵称/用户 id 三分离 + 家目录/回收站新布局；用户 2026-10-20 清单 1–6 条；跳号 0.2.9→0.2.11 系维护者定版指令；配套 Client 0.3.12；tag 由维护者打）
+
+### 破坏性变更①：管理/用户 API 完全独立、不复用（需求1/2/3）
+- `AdminHandler` **删除 `registerV1` 重复注册**（0.2.10 前管理端口完整暴露全部用户 API 供内嵌管理台反向调用——本批起两端口注册集**零交集**：管理端口对 `/api/v1/*` 业务面与 `/s/:token` 一律 404；用户端口管理路由 404 自 0.1.0 起即为然）。
+- 管理台专属端点（仅管理端口）：`POST /api/v1/admin/login`（超管+DB 管理员两分支从 `handleLogin` 抽出为 `handleAdminLogin`；注册在**裸组**——无 requireDB/无 authCtx/无 maintenanceGate，超管无库可登、暂停期操作员不被锁死，修正 0.2.4 前"暂停期管理台登录 503"与 middleware 文档不符问题）；`PUT /api/v1/admin/acl`（物理键直存、无角色分叉）；`POST/PUT/DELETE /api/v1/admin/links`（管理员代管分享，无所有权校验，响应 `linkViewFull` 含物理键与 createdBy——管理面可见）。
+- `handleLogin`/`authCtx`/`handleACLPut`/`handleShareUpdate`/`shareByTokenOwner`/`handleACLDelete` 中的 `adminModeKey` 角色分叉全部移除；`computeBases` 管理端口整根分支删除（拆分后管理引擎不再有 scope() 调用者；`adminScope` 标记保留供 authCtx 分流与 `/api` 的 adminUI 字段）。用户端口响应 `{"token"}` 形状不变。
+- 分享访问链不变：管理台建的链接经**用户端口** `/s/:token` 匿名访问；管理台分享完整 URL 由 `/admin/info` 的 `listen`+`tlsEnabled` 构造（不再 `location.origin`）。
+
+### 破坏性变更②：账户/昵称/用户 id 三分离 + 同名复用目录 bug 修复（需求4）
+- 模型：`username` 语义=**账户**（唯一、不可改、可作目录名片段，登录凭证名）；新增 `nickname`=**昵称**（可改、可重复、仅展示，空=显示回退账户；`users` 加列 TEXT DEFAULT ''，四方言 extra 幂等加列守卫、file 驱动 JSON 加性）；`User.ID`=用户 id（自增永不复用，**只服务端内部使用**）。
+- **串目录 bug 根修**：家目录名 `user_<账户>_<用户id>`——删除账户后同名重建必落新目录（旧 `EnsureHomeFor` 的 `MkdirAll(Users/<用户名>)` 对删号遗留目录静默复用是根因；目录名含永不复用的 id 后从结构上绝迹）。删号磁盘行为保持"只删元数据、目录留孤儿"（维护者决策，运维自清）。
+- 用户端口 API 边界彻底去数字用户 id：`GET /auth/me` → `{username, nickname}`（昵称现读库，热路径 authCtx 零查库红线不破）；新增 `PUT /auth/profile {nickname}`（自助改昵称，不吊销会话）；`/acl/subjects` → `{account, nickname, subject}`（去 id/role/members）；ACL 条目 GET/PUT 响应改 `subject:"user:<账户>"`+`subjectName`（存储仍数字键控，边界翻译；PUT 兼容旧数字 `subjectId` 入参）；`/versions` 不再转储 store 行（物理 rootId/path/storeId/createdBy 泄漏面一并收敛）；share `linkView` 去 `createdBy`；`/ai/*` 响应视图化（去 userId/物理键）。管理台（服务端管理面，非"客户端"）按需求4 决策保留数字 id REST 寻址。
+- 家目录虚拟根遮蔽：客户端可见令牌 **`_users:<账户>`**（含分享进家目录的子基座逐段映射 `alice/docs`）；入方向 `scope()` 经 `translateHomeJail` 还原真实基座、`scopePhys` 物理键回流天然直通——升级前后 `_users:<账户>` 恒字面有效，存量客户端缓存根 id 不失效；伪造他人目录仍 403（基座命中检查原样）。
+- 附带修复：`validLink` 对 `CreatedBy=0`（超管哨兵）跳过创建者校验——超管所建分享此前必 410。
+
+### 变更③：回收站与家目录并级（需求5）+ 一次性布局迁移
+- 新布局：`<dataDir>/Users/user_<账户>_<id>`（家目录）+ `Users/user_<账户>_<id>_trash`（回收站实体，**并级**不再内嵌 `.fmtrash`）。
+- 迁移 `fileops.MigrateUserHomeLayout`（server_meta 标记 `userhomes.v8`，启动 + DB 热切换双站点，模式同 v7）：目录 rename → 内嵌 `.fmtrash` 条目逐搬 `*_trash` → `Store.RewritePhysicalPath(_users, 旧名, 新名)`（**七表**存量物理键行改写：file_metas/ai_descriptions/trash_items/folder_acls/share_links/file_versions/upload_sessions；新接口方法 sqlStore/fileStore/proxy/cache 全实现，单事务/单写锁、幂等）→ `SetUserRoots` 换 SubPath。**磁盘先改名后写库**（崩溃锚点），三态可重入；回收站实体解析保留三候选（并级→迁移中间态嵌套→旧名嵌套→中央），迁移中断窗口内条目仍可还原/清除。
+- `Cleaner.removeTrashBlob` 候选化（不再按 `u.Username` 直拼）；`.fmtrash` 保留名拦截与列表隐藏**保留**（未迁孤儿目录纵深防御）。config schemaVersion 保持 12。
+
+### 变更④：日志六级化与必要日志补充（用户 2026-10-20 追加指令；版本保持 0.2.11）
+- **六级**：`trace < debug < info < warn < error < fatal`（logx 引入标准库 `log/slog` 日志库之上扩展：trace=-8、fatal=16，文本 Handler ReplaceAttr 渲染 `TRACE`/`FATAL` 等级名）；`log.level` 配置取值域加宽、默认 **warn** 不变、非法收敛 warn——仅取值域变化无结构变更，schemaVersion 保持 12。
+- **logx.Fatal**：以 fatal 级落行（任何配置等级下必可见）后 `os.Exit(1)`；main/balancer 启动 fail-fast 站点全部改走 logx.Fatal——**根治旧 `log.Fatalf` 经 stdlib 桥接按 INFO 走、默认 warn 等级下进程死得无声无息的吞没问题**；`log.Printf("warn: …")` 各站点转 logx.Warn（家目录迁移未完成/跳过、认证预热失败、jail 迁移告警、超管同名遮蔽账户告警、balancer worker 摘除）。
+- **URL 凭证脱敏**（敏感纪律扩展）：分享访问凭证存在于 URL（`/s/<token>` 路径段、`?st=` 查询值、share 口令参数）——新增 `api.sanitizeLogTarget` 统一遮蔽（`/s/**`、`st/token/password/pass/pwd=**`，键名保留便于排障；query 解析失败整体 `<unparsed>`），loggerGin 请求行与 writeErr internal error 行同用。
+- **补充必要日志**（只记账户名/结果/IP/计数，绝不记口令、Bearer 凭证、分享 token 值）：
+  authCtx 拒绝面——X-Client-Id 核对不符（WarnT）、超管/管理员凭证出现在用户端口（WarnT，需求36）、超管凭据纪元推进吊销（WarnT）、share 凭证被当身份/坏凭证（DebugT）、身份解析成功细节（TraceT，trace 级形态示范）；
+  登录面——用户端口/管理台登录成功（InfoT）、防爆破锁定（WarnT）、跨端口登录拒绝（WarnT）、口令不符（DebugT）；
+  账户与权限面——自助改密成功（InfoT，含会话全吊销）、自助改昵称（InfoT）、管理台创建/更新账户与目录分配（InfoT）、**删除账户（WarnT，注明孤儿目录留盘）**、用户端口与管理端 ACL 更新（InfoT）、分享链接创建/删除（InfoT，不记 token）；
+  fileops 家目录迁移 skip 类（Warn）与改道明细（Info）。
+- trace 级为"逐请求细节"层（生产常闭），排障时 `log.level=trace` 打开；六级全链路冒烟：默认 warn 下 INFO/DEBUG/TRACE 静默、WARN/ERROR/FATAL 可见；fail-fast FATAL 行落盘且退出码 1；`/s/**?st=**&password=**` 脱敏；敏感值全量 grep 日志 0 命中。
+
+### 验证（需求29）
+- `go build ./... && go vet ./...` 通过；冒烟（文件存储 + sqlite 双实例）：建号目录/回收站并级 ✓ 删号同名重建新目录互不可见 ✓ /auth/me+profile ✓ roots 令牌 `_users:alice` 无数字 id ✓ ACL 账户化往返+旧数字入参兼容+伪造拒绝 ✓ 回收站删除/还原/彻底删除 ✓ 双端口注册集零交集（404 面）✓ 管理台登录/ACL/分享 CRUD、超管链接 `/s/` 访问不 410 ✓ 暂停期用户口 503/管理台登录可用 ✓ 存量迁移（旧布局回退后启动自动迁移，还原/分享链完整）✓。
+
+### 兼容
+- **Server 0.2.11 ↔ Client 0.3.12（推荐）**。旧客户端/移动端可用但按需降级（登录/浏览/上传下载/回收站/分享访问全兼容——`_users:<账户>` 字面不变；ACL 编辑在 ≤0.3.11 桌面/移动端对新服务端仍发数字 subjectId=兼容入参可用，但 GET 响应已无数字 id——旧 UI 若回显 subjectId 会显示为空，属显示降级）；移动端 filemanagemobile 本批未适配，适配清单见根 CHANGELOG。
 
 ## [0.2.9] - 2026-10-16（版本号对齐批：配套 Client 0.3.9 修复批；tag 由维护者打）
 

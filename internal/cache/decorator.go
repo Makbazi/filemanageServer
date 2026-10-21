@@ -103,11 +103,38 @@ func (s *cached) UpdateUserRoots(id int64, roots []string) error {
 	return s.c.DropUser(id)
 }
 
+func (s *cached) UpdateUserNickname(id int64, nickname string) error {
+	if err := s.Store.UpdateUserNickname(id, nickname); err != nil {
+		return err
+	}
+	return s.c.DropUser(id)
+}
+
+// UpdateUserAuth（0.2.12）：影子结构含邮箱/二次验证字段，写后必须逐出用户缓存
+// （同改昵称纪律；认证图不经本装饰器——UpdateAuthSessionFlow 由嵌入的
+// store.Store 天然透传，会话行刻意不进本缓存）。
+func (s *cached) UpdateUserAuth(id int64, email string, emailVerified bool, mfaMethod, mfaSecret string) error {
+	if err := s.Store.UpdateUserAuth(id, email, emailVerified, mfaMethod, mfaSecret); err != nil {
+		return err
+	}
+	return s.c.DropUser(id)
+}
+
 func (s *cached) UpdateUserRole(id int64, role string) error {
 	if err := s.Store.UpdateUserRole(id, role); err != nil {
 		return err
 	}
 	return s.c.DropUser(id)
+}
+
+// RewritePhysicalPath 透传后全量清空缓存（0.2.11 布局迁移仅发生在启动/换库
+// 装配期，跨七表批量改写无法逐键失效，全清最稳妥且代价可忽略）。
+func (s *cached) RewritePhysicalPath(rootID, oldPrefix, newPrefix string) (int64, error) {
+	n, err := s.Store.RewritePhysicalPath(rootID, oldPrefix, newPrefix)
+	if err != nil || n == 0 {
+		return n, err
+	}
+	return n, s.c.FlushAll()
 }
 
 func (s *cached) DeleteUser(id int64) error {

@@ -9,9 +9,11 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"filemanageServer/internal/fileops"
+	"filemanageServer/internal/logx"
 	store "filemanageServer/internal/store"
 	"filemanageServer/internal/version"
 )
@@ -25,7 +27,7 @@ func (s *Server) handleAdminInfo(c *gin.Context) {
 		rt := &s.Cfg.Roots[i]
 		roots = append(roots, map[string]string{"id": rt.ID, "name": rt.Name, "path": rt.Path})
 	}
-	writeJSON(c, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"version":            version.Version,
 		"apiVersions":        version.APIVersions,
 		"instanceId":         s.Cfg.InstanceID,
@@ -49,7 +51,13 @@ func (s *Server) handleAdminInfo(c *gin.Context) {
 		"roots":              roots,
 		"uptimeSec":          int64(time.Since(s.startedAt).Seconds()),
 		"goVersion":          runtime.Version(),
-	})
+	}
+	// 0.2.12 BFF：登录态由 Cookie 承载、前端不持凭证——info 顺带回显当前管理
+	// 员概要（userView 管理面自有字段），控制台刷新页面即可恢复顶栏显示。
+	if cu := currentUser(c); cu != nil {
+		out["who"] = userView(cu)
+	}
+	writeJSON(c, http.StatusOK, out)
 }
 
 // ---------- 用户管理 ----------
@@ -85,7 +93,8 @@ func (s *Server) handleAdminListUsers(c *gin.Context) {
 
 func (s *Server) handleAdminCreateUser(c *gin.Context) {
 	var req struct {
-		Username     string   `json:"username"`
+		Username     string   `json:"username"` // 0.2.11 语义=账户（唯一、不可改）
+		Nickname     string   `json:"nickname"` // 0.2.11 可改可重复；空=显示回退账户
 		Password     string   `json:"password"`
 		Role         string   `json:"role"`
 		AllowedRoots []string `json:"allowedRoots"`
@@ -103,11 +112,12 @@ func (s *Server) handleAdminCreateUser(c *gin.Context) {
 		writeErr(c, http.StatusForbidden, errors.New("只有超级管理员可以创建管理员账户"))
 		return
 	}
-	u, code, err := s.createUser(req.Username, req.Password, req.Role, req.AllowedRoots)
+	u, code, err := s.createUser(req.Username, req.Nickname, req.Password, req.Role, req.AllowedRoots)
 	if err != nil {
 		writeErr(c, code, err)
 		return
 	}
+	logx.InfoT(traceOf(c), "admin: 创建账户 account=%q role=%s id=%d", req.Username, req.Role, u.ID)
 	s.audit(c, store.AuditUserCreate, "", 0, "", "", fmt.Sprintf("created user %s role=%s", req.Username, req.Role))
 	writeJSON(c, http.StatusOK, userView(u))
 }
@@ -135,12 +145,44 @@ func (s *Server) handleAdminUpdateUser(c *gin.Context) {
 	}
 	var req struct {
 		Password     string   `json:"password"`
+		Nickname     *string  `json:"nickname"` // 0.2.11：指针区分"未传/传入（含空串清除）"
+		Email        *string  `json:"email"`    // 0.2.12：同上（登记邮箱；变更即清验证态）
 		Role         string   `json:"role"`
 		AllowedRoots []string `json:"allowedRoots"`
 	}
 	if err := decode(c, &req); err != nil {
 		writeErr(c, http.StatusBadRequest, err)
 		return
+	}
+	// 0.2.12：管理员登记/修改邮箱——不做 SMTP 验证（验证=用户自助 OTP 流程），
+	// 值变化即 emailVerified=false；若该账户二验通道是 email，改后下次登录会被
+	// 引导报错（须先重新验证邮箱），此处不静默改 method（治理入口=PUT /users/:id/mfa）。
+	if req.Email != nil && target.Role == store.RoleUser {
+		em := strings.ToLower(strings.TrimSpace(*req.Email))
+		if em != "" && !validEmail(em) {
+			writeErr(c, http.StatusBadRequest, errors.New("邮箱地址格式不正确"))
+			return
+		}
+		if em != target.Email {
+			verified := false
+			if err := s.Store.UpdateUserAuth(target.ID, em, verified, target.MfaMethod, target.MfaSecret); err != nil {
+				writeErr(c, statusOf(err), err)
+				return
+			}
+			logx.InfoT(traceOf(c), "admin: 登记邮箱变更 id=%d account=%q clearedVerified=%v", target.ID, target.Username, target.EmailVerified)
+		}
+		target.Email, target.EmailVerified = em, false
+	}
+	if req.Nickname != nil {
+		nick, code, nerr := normalizeNickname(*req.Nickname)
+		if nerr != nil {
+			writeErr(c, code, nerr)
+			return
+		}
+		if err := s.Store.UpdateUserNickname(id, nick); err != nil {
+			writeErr(c, statusOf(err), err)
+			return
+		}
 	}
 	if req.Password != "" {
 		if len(req.Password) < 6 {
@@ -185,7 +227,9 @@ func (s *Server) handleAdminUpdateUser(c *gin.Context) {
 			return
 		}
 	}
-	s.audit(c, store.AuditUserUpdate, "", 0, "", "", fmt.Sprintf("updated user id=%d (role/password)", id))
+	logx.InfoT(traceOf(c), "admin: 更新账户 id=%d password=%v role=%v nickname=%v",
+		id, req.Password != "", req.Role != "", req.Nickname != nil)
+	s.audit(c, store.AuditUserUpdate, "", 0, "", "", fmt.Sprintf("updated user id=%d (role/password/nickname)", id))
 	writeJSON(c, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -224,6 +268,7 @@ func (s *Server) handleAdminDeleteUser(c *gin.Context) {
 	// Store.DeleteUser 已级联清 L3 auth_sessions；再清认证中心 L1/L2（散点/他实例
 	// 凭证靠 L3 删除证伪 + memTTL 陈旧回源兜底，此处主动清本实例上层）。
 	_ = s.Auth.RevokeUser(c.Request.Context(), id)
+	logx.WarnT(traceOf(c), "admin: 删除账户 id=%d account=%q（家目录与回收站目录以孤儿态保留磁盘，同名重建不复用）", id, target.Username)
 	s.audit(c, store.AuditUserDelete, "", 0, "", "", fmt.Sprintf("deleted user id=%d", id))
 	writeJSON(c, http.StatusOK, map[string]any{"ok": true})
 }
@@ -306,14 +351,17 @@ func (s *Server) handleAdminSetUserRoots(c *gin.Context) {
 			return
 		}
 		sub := fileops.CleanRel(r.SubPath)
-		// 需求3：内部家目录根的分配即 <dataDir>/Users/<用户名>，
-		// 只允许指向本人用户名（防把他人家目录分配给该用户），且回收站内核不可入分配。
+		// 需求3：内部家目录根的分配即 <dataDir>/Users/user_<账户>_<用户id>
+		// （0.2.11 命名），只允许指向本人家目录（防把他人家目录分配给该用户），
+		// 且回收站内核（旧 .fmtrash/新 _trash 名）不可入分配。
 		if r.RootID == store.HomeRootID {
-			if sub != fileops.CleanRel(target.Username) || fileops.UsernameAsDir(target.Username) != nil {
-				writeErr(c, http.StatusBadRequest, fmt.Errorf("home root assignment must be (%q, %q)", store.HomeRootID, target.Username))
+			want := fileops.HomeDirName(target.Username, target.ID)
+			legacy := fileops.CleanRel(target.Username) // 未迁移存量行旧名（v8 迁移前合法）
+			if (sub != want && sub != legacy) || fileops.UsernameAsDir(target.Username) != nil {
+				writeErr(c, http.StatusBadRequest, fmt.Errorf("home root assignment must be (%q, %q)", store.HomeRootID, want))
 				return
 			}
-			if hasSegment(sub, fileops.HomeTrashName) {
+			if hasSegment(sub, fileops.HomeTrashName) || sub == fileops.UserTrashDirName(want) {
 				writeErr(c, http.StatusBadRequest, errReservedName)
 				return
 			}
@@ -337,7 +385,7 @@ func (s *Server) handleAdminSetUserRoots(c *gin.Context) {
 		urs = append(urs, &store.UserRoot{UserID: id, RootID: r.RootID, SubPath: sub, Alias: r.Alias})
 	}
 	// 本接口为全量替换——丢失家目录行则自动补回（家目录随账号生灭、
-	// 不可经分配编辑器摘除；用户名不合法的历史遗留不阻塞保存）。
+	// 不可经分配编辑器摘除；账户名不合法的历史遗留不阻塞保存）。
 	hasHome := false
 	for _, r := range urs {
 		if r.RootID == store.HomeRootID {
@@ -346,7 +394,11 @@ func (s *Server) handleAdminSetUserRoots(c *gin.Context) {
 		}
 	}
 	if !hasHome && fileops.UsernameAsDir(target.Username) == nil {
-		if _, serr := os.Stat(s.Cfg.HomeDir(target.Username)); serr == nil {
+		// 优先新布局名（0.2.11）；旧布局目录（v8 迁移前）也认，按实存名补行。
+		home := fileops.HomeDirName(target.Username, target.ID)
+		if _, serr := os.Stat(fileops.HomeDirPath(s.Cfg.UsersDir(), home)); serr == nil {
+			urs = append(urs, &store.UserRoot{UserID: id, RootID: store.HomeRootID, SubPath: home, Alias: "Home"})
+		} else if _, serr := os.Stat(fileops.HomeDirPath(s.Cfg.UsersDir(), target.Username)); serr == nil {
 			urs = append(urs, &store.UserRoot{UserID: id, RootID: store.HomeRootID, SubPath: target.Username, Alias: "Home"})
 		}
 	}
@@ -354,6 +406,7 @@ func (s *Server) handleAdminSetUserRoots(c *gin.Context) {
 		writeErr(c, statusOf(err), err)
 		return
 	}
+	logx.InfoT(traceOf(c), "admin: 目录分配已保存 user=%q dirs=%d", target.Username, len(urs))
 	s.audit(c, store.AuditRootsAssign, "", 0, "", "", fmt.Sprintf("assigned %d dirs to user id=%d", len(urs), id))
 	out, _ := s.Store.ListUserRoots(id)
 	if out == nil {
@@ -505,6 +558,90 @@ func (s *Server) handleAdminListACLs(c *gin.Context) {
 		acls = []*store.FolderACL{}
 	}
 	writeJSON(c, http.StatusOK, acls)
+}
+
+// handleAdminACLPut PUT /api/v1/admin/acl {rootId, path, entries:[{subjectType, subjectId, perms}]}
+// （0.2.11 端口彻底拆分：管理台专属 ACL 写入——物理键直存、管理员全权、
+// 无 jail 翻译、无角色分叉；用户端口 ACL handler 不再服务管理台）。
+// entries 空数组 = 清除该路径全部 ACL；public 主体强制无下载/上传/删除/分享
+// （需求6 底线与用户端口一致）。
+func (s *Server) handleAdminACLPut(c *gin.Context) {
+	var req struct {
+		RootID  string        `json:"rootId"`
+		Path    string        `json:"path"`
+		Entries []aclEntryReq `json:"entries"`
+	}
+	if err := decode(c, &req); err != nil || req.RootID == "" {
+		writeErr(c, http.StatusBadRequest, errors.New("rootId required"))
+		return
+	}
+	root := s.Roots[req.RootID]
+	if root == nil {
+		writeErr(c, http.StatusBadRequest, fmt.Errorf("unknown root %q", req.RootID))
+		return
+	}
+	phys := fileops.CleanRel(req.Path)
+	if _, err := fileops.JoinRoot(root.Path, phys); err != nil {
+		writeErr(c, http.StatusBadRequest, err)
+		return
+	}
+	u := currentUser(c) // 组链已 requireAdmin
+	// 主体存在性校验（拒绝悬空条目；管理面数字 subjectId——它有 /admin/users）
+	for _, e := range req.Entries {
+		switch e.SubjectType {
+		case store.SubjectUser, store.SubjectGroup, store.SubjectPublic:
+		default:
+			writeErr(c, http.StatusBadRequest, errors.New("subjectType must be user|group|public"))
+			return
+		}
+		if e.SubjectType == store.SubjectPublic {
+			continue
+		}
+		if e.SubjectID <= 0 {
+			writeErr(c, http.StatusBadRequest, errors.New("subjectId required for user/group"))
+			return
+		}
+		var serr error
+		if e.SubjectType == store.SubjectUser {
+			_, serr = s.Store.GetUserByID(e.SubjectID)
+		} else {
+			_, serr = s.Store.GetGroupByID(e.SubjectID)
+		}
+		if serr != nil {
+			writeErr(c, http.StatusBadRequest, errors.New("subjectId does not exist"))
+			return
+		}
+	}
+	old, err := s.Store.GetFolderACLs(req.RootID, phys)
+	if err != nil {
+		writeErr(c, http.StatusInternalServerError, err)
+		return
+	}
+	for _, o := range old {
+		_ = s.Store.DeleteFolderACL(o.ID)
+	}
+	for _, e := range req.Entries {
+		acl := &store.FolderACL{
+			RootID: req.RootID, Path: phys,
+			SubjectType: e.SubjectType, SubjectID: e.SubjectID,
+			Perms: e.Perms, CreatedBy: u.ID,
+		}
+		if e.SubjectType == store.SubjectPublic {
+			acl.SubjectID = 0
+			acl.Perms.Download, acl.Perms.Upload, acl.Perms.Delete, acl.Perms.Share = false, false, false, false
+		}
+		if err := s.Store.SetFolderACL(acl); err != nil {
+			writeErr(c, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	entries, _ := s.Store.GetFolderACLs(req.RootID, phys)
+	if entries == nil {
+		entries = []*store.FolderACL{}
+	}
+	logx.InfoT(traceOf(c), "admin: ACL 更新 root=%s path=%q entries=%d", req.RootID, phys, len(req.Entries))
+	s.audit(c, store.AuditACLSet, "", 0, req.RootID, phys, fmt.Sprintf("admin set %d entries", len(req.Entries)))
+	writeJSON(c, http.StatusOK, map[string]any{"ok": true, "entries": entries})
 }
 
 // handleAdminListLinks GET /api/v1/admin/links → 全部分享链接。

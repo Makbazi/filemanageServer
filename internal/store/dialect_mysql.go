@@ -25,10 +25,13 @@ func mysqlDDL() []string {
 		`CREATE TABLE IF NOT EXISTS users (
 			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 			username VARCHAR(64) NOT NULL UNIQUE,
+			nickname VARCHAR(128) NOT NULL DEFAULT '',
 			password_hash VARCHAR(100) NOT NULL,
 			role VARCHAR(16) NOT NULL DEFAULT 'user',
 			allowed_roots TEXT NOT NULL,
-			created_at DATETIME(3) NOT NULL)` + mysqlTail,
+			created_at DATETIME(3) NOT NULL,
+			email VARCHAR(320) NOT NULL DEFAULT '', email_verified TINYINT NOT NULL DEFAULT 0,
+			mfa_method VARCHAR(16) NOT NULL DEFAULT '', mfa_secret VARCHAR(64) NOT NULL DEFAULT '')` + mysqlTail,
 		`CREATE TABLE IF NOT EXISTS file_metas (
 			id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
 			user_id BIGINT NOT NULL, root_id VARCHAR(32) NOT NULL, path VARCHAR(700) NOT NULL,
@@ -115,6 +118,7 @@ func mysqlDDL() []string {
 			username VARCHAR(64) NOT NULL DEFAULT '', role VARCHAR(16) NOT NULL DEFAULT '',
 			super TINYINT NOT NULL DEFAULT 0, gen BIGINT NOT NULL DEFAULT 0,
 			ref VARCHAR(128) NOT NULL DEFAULT '', client_id VARCHAR(64) NOT NULL DEFAULT '',
+			flow_data VARCHAR(1024) NOT NULL DEFAULT '',
 			token_hash VARCHAR(128) NOT NULL UNIQUE,
 			expires_at DATETIME(3) NOT NULL, last_used_at DATETIME(3) NOT NULL,
 			created_at DATETIME(3) NOT NULL,
@@ -122,19 +126,36 @@ func mysqlDDL() []string {
 	}
 }
 
-// mysqlEnsureExtra 存量库加列守卫（0.2.4 auth_sessions.client_id；只增不改，
-// 属幂等 DDL 清单的组成部分——MySQL 不支持 ADD COLUMN IF NOT EXISTS，先查
-// information_schema 再 ALTER）。
+// mysqlEnsureExtra 存量库加列守卫（0.2.4 auth_sessions.client_id、
+// 0.2.11 users.nickname、0.2.12 auth_sessions.flow_data + users 邮箱/二次验证
+// 四列；只增不改，属幂等 DDL 清单的组成部分——MySQL 不支持
+// ADD COLUMN IF NOT EXISTS，先查 information_schema 再 ALTER）。
 func mysqlEnsureExtra(db *gorm.DB) error {
-	var cnt int64
-	err := db.Raw("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'auth_sessions' AND column_name = 'client_id'").
-		Scan(&cnt).Error
-	if err != nil {
-		return fmt.Errorf("migrate: probe client_id: %w", err)
+	probe := func(table, column, ddl string) error {
+		var cnt int64
+		err := db.Raw("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?", table, column).
+			Scan(&cnt).Error
+		if err != nil {
+			return fmt.Errorf("migrate: probe %s.%s: %w", table, column, err)
+		}
+		if cnt == 0 {
+			if err := db.Exec(ddl).Error; err != nil {
+				return fmt.Errorf("migrate: add %s.%s: %w", table, column, err)
+			}
+		}
+		return nil
 	}
-	if cnt == 0 {
-		if err := db.Exec("ALTER TABLE auth_sessions ADD COLUMN client_id VARCHAR(64) NOT NULL DEFAULT ''").Error; err != nil {
-			return fmt.Errorf("migrate: add client_id: %w", err)
+	for _, p := range [][3]string{
+		{"auth_sessions", "client_id", "ALTER TABLE auth_sessions ADD COLUMN client_id VARCHAR(64) NOT NULL DEFAULT ''"},
+		{"users", "nickname", "ALTER TABLE users ADD COLUMN nickname VARCHAR(128) NOT NULL DEFAULT ''"},
+		{"auth_sessions", "flow_data", "ALTER TABLE auth_sessions ADD COLUMN flow_data VARCHAR(1024) NOT NULL DEFAULT ''"},
+		{"users", "email", "ALTER TABLE users ADD COLUMN email VARCHAR(320) NOT NULL DEFAULT ''"},
+		{"users", "email_verified", "ALTER TABLE users ADD COLUMN email_verified TINYINT NOT NULL DEFAULT 0"},
+		{"users", "mfa_method", "ALTER TABLE users ADD COLUMN mfa_method VARCHAR(16) NOT NULL DEFAULT ''"},
+		{"users", "mfa_secret", "ALTER TABLE users ADD COLUMN mfa_secret VARCHAR(64) NOT NULL DEFAULT ''"},
+	} {
+		if err := probe(p[0], p[1], p[2]); err != nil {
+			return err
 		}
 	}
 	return nil

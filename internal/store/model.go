@@ -16,14 +16,34 @@ const (
 const SuperAdminID int64 = 0
 
 // User 服务端账户，区分用户并限定可见根目录。
+// 0.2.11 三分离：Username=账户（登录名，唯一不可改，参与家目录命名）；
+// Nickname=昵称（可改可重复，仅展示用，不进任何路径/键）；ID=用户 id
+// （仅服务端内部使用，用户端口响应面不得出现）。
 type User struct {
 	ID           int64     `json:"id"`
 	Username     string    `json:"username"`
+	Nickname     string    `json:"nickname"`
 	PasswordHash string    `json:"-"`
 	Role         string    `json:"role"`
 	AllowedRoots []string  `json:"allowedRoots"` // 空表示允许全部根目录
 	CreatedAt    time.Time `json:"createdAt"`
+	// 0.2.12 认证批（OAuth2+2FA）：邮箱与二次验证均为**非必须**配置。
+	// Email 可只登记不验证（EmailVerified=false 时不可作邮箱验证码通道）；
+	// MfaMethod ∈ ""|totp|email（默认 ""=不启用二次验证）；MfaSecret 为 TOTP
+	// 密钥（base32）——敏感字段纪律同 PasswordHash：json:"-"，永不出 API/日志，
+	// 只存服务端（库/file 帧内，file 驱动 0600 形态同既有哈希）。
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"emailVerified"`
+	MfaMethod     string `json:"mfaMethod"`
+	MfaSecret     string `json:"-"`
 }
+
+// 二次验证方式（0.2.12；默认 MfaOff=不使用）。
+const (
+	MfaOff   = ""
+	MfaTotp  = "totp"
+	MfaEmail = "email"
+)
 
 // FileMeta 文件基础元数据（归属、日期等）。
 type FileMeta struct {
@@ -183,9 +203,24 @@ type Session struct {
 //     Role 判定——Role=admin（含超管）为绝对 session.accessTTL 且不滑动（保持
 //     管理面每小时重登节奏），普通用户滑动 session.idleDays（每次认证请求续期）；
 //   - share：分享链接解锁会话，绝对 2h，Ref 绑定链接 token。
+//
+// 0.2.12 认证批新增 kind（OAuth2/OIDC 授权码流的伴生条目——同表同三层、
+// 同"只存哈希"纪律；authCtx 身份注入只认 user，其余新 kind 一律 401）：
+//   - flow：登录中转会话（账密已过、或等待二次验证；10 分钟绝对）；
+//   - code：授权码（60 秒一次性，PKCE challenge/redirect/nonce 存 FlowData）；
+//   - browser：浏览器登录态 Cookie 会话（授权页静默续用；绝对 12h）；
+//   - refresh：OAuth 刷新令牌（绝对 refreshDays，滑动不适用；凭证绑定同 user）；
+//   - device / devuser：设备授权请求双生行（RFC 8628 无浏览器登录：device_code
+//     行 + user_code 索引行，10 分钟；FlowData 互相引用对方哈希与状态）。
 const (
-	AuthKindUser  = "user"
-	AuthKindShare = "share"
+	AuthKindUser    = "user"
+	AuthKindShare   = "share"
+	AuthKindFlow    = "flow"
+	AuthKindCode    = "code"
+	AuthKindBrowser = "browser"
+	AuthKindRefresh = "refresh"
+	AuthKindDevice  = "device"
+	AuthKindDevUser = "devuser"
 )
 
 // AuthShareUserID share 行的 user_id 保留值——与超管哨兵 SuperAdminID(0) 区分，
@@ -213,6 +248,11 @@ type AuthSession struct {
 	ExpiresAt  time.Time `json:"expiresAt"`
 	LastUsedAt time.Time `json:"lastUsedAt"`
 	CreatedAt  time.Time `json:"createdAt"`
+	// FlowData（0.2.12）：kind=flow/code/browser/refresh/device/devuser 的
+	// 协议状态 JSON（PKCE challenge、redirect_uri、nonce、二次验证阶段、
+	// 邮箱 OTP 哈希、设备码互引与批准状态等）。绝不含明文凭证；user_code 只存
+	// 哈希互引。json:"-"——任何 API 响应不得转储（含会话绑定的待验证邮箱 OTP）。
+	FlowData string `json:"-"`
 }
 
 // ---------- 审计日志（安全可追溯迭代） ----------

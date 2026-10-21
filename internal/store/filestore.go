@@ -427,6 +427,42 @@ func (f *fileStore) UpdateUserPassword(id int64, hash string) error {
 	return f.syncNowLocked()
 }
 
+func (f *fileStore) UpdateUserNickname(id int64, nickname string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return closedErr()
+	}
+	r, ok := f.idx.users[id]
+	if !ok {
+		return ErrNotFound
+	}
+	r.Nickname = nickname
+	if err := f.putLocked(tUsers, *r); err != nil {
+		return err
+	}
+	return f.syncNowLocked()
+}
+
+// UpdateUserAuth（0.2.12）：邮箱+二次验证四字段全量写入（password_hash 不触；
+// 关键安全元数据变更同改密/改昵称纪律同步 fsync）。
+func (f *fileStore) UpdateUserAuth(id int64, email string, emailVerified bool, mfaMethod, mfaSecret string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return closedErr()
+	}
+	r, ok := f.idx.users[id]
+	if !ok {
+		return ErrNotFound
+	}
+	r.Email, r.EmailVerified, r.MfaMethod, r.MfaSecret = email, b2i(emailVerified), mfaMethod, mfaSecret
+	if err := f.putLocked(tUsers, *r); err != nil {
+		return err
+	}
+	return f.syncNowLocked()
+}
+
 func (f *fileStore) UpdateUserRoots(id int64, roots []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -779,6 +815,137 @@ func (f *fileStore) RenameFileMeta(userID int64, rootID, from, to string) error 
 	}
 	f.appends++
 	return nil
+}
+
+// RewritePhysicalPath 见接口注释（0.2.11 家目录布局迁移）。一次写锁内逐表改写
+// （模式仿 RenameFileMeta：摘旧二级键→改字段→重挂新键→追加 put 帧），
+// trash/shares/uploads 的二级键不含路径、仅改字段。全批成功一次 syncNow。
+// 语义与 sqlStore 实现一致（同 root 内改后路径不会互相碰撞——目标名含唯一 id）。
+func (f *fileStore) RewritePhysicalPath(rootID, oldPrefix, newPrefix string) (int64, error) {
+	if oldPrefix == "" || oldPrefix == newPrefix {
+		return 0, nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return 0, closedErr()
+	}
+	var total int64
+	rewrite := func(p *string) bool {
+		if !pathInSubtree(*p, oldPrefix) {
+			return false
+		}
+		*p = newPrefix + strings.TrimPrefix(*p, oldPrefix)
+		total++
+		return true
+	}
+	appendRow := func(t byte, row any) error {
+		b, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		if err := f.appendLocked(opPut(t), b); err != nil {
+			return err
+		}
+		f.appends++
+		return nil
+	}
+	for _, r := range f.idx.fileMetas {
+		if r.RootID != rootID {
+			continue
+		}
+		k := metaKeyOf(r.UserID, r.RootID, r.Path)
+		if rewrite(&r.Path) {
+			if f.idx.fileMetasBy[k] == r {
+				delete(f.idx.fileMetasBy, k)
+			}
+			f.idx.fileMetasBy[metaKeyOf(r.UserID, r.RootID, r.Path)] = r
+			if err := appendRow(tFileMetas, *r); err != nil {
+				return total, err
+			}
+		}
+	}
+	for _, r := range f.idx.aiDescs {
+		if r.RootID != rootID {
+			continue
+		}
+		k := descKeyOf(r.UserID, r.RootID, r.Path, r.Kind)
+		if rewrite(&r.Path) {
+			if f.idx.aiDescsBy[k] == r {
+				delete(f.idx.aiDescsBy, k)
+			}
+			f.idx.aiDescsBy[descKeyOf(r.UserID, r.RootID, r.Path, r.Kind)] = r
+			if err := appendRow(tAIDescs, *r); err != nil {
+				return total, err
+			}
+		}
+	}
+	for _, r := range f.idx.trash {
+		if r.RootID != rootID {
+			continue
+		}
+		if rewrite(&r.RelPath) {
+			if err := appendRow(tTrash, *r); err != nil {
+				return total, err
+			}
+		}
+	}
+	for _, r := range f.idx.acls {
+		if r.RootID != rootID {
+			continue
+		}
+		k := aclKeyOf(r.RootID, r.Path, r.SubjectType, r.SubjectID)
+		if rewrite(&r.Path) {
+			if f.idx.aclsBy[k] == r {
+				delete(f.idx.aclsBy, k)
+			}
+			f.idx.aclsBy[aclKeyOf(r.RootID, r.Path, r.SubjectType, r.SubjectID)] = r
+			if err := appendRow(tFolderACLs, *r); err != nil {
+				return total, err
+			}
+		}
+	}
+	for _, r := range f.idx.shares {
+		if r.RootID != rootID {
+			continue
+		}
+		if rewrite(&r.Path) {
+			if err := appendRow(tShareLinks, *r); err != nil {
+				return total, err
+			}
+		}
+	}
+	for _, r := range f.idx.versions {
+		if r.RootID != rootID {
+			continue
+		}
+		k := versionKeyOf(r.RootID, r.Path, r.VersionNo)
+		if rewrite(&r.Path) {
+			if f.idx.versionsBy[k] == r {
+				delete(f.idx.versionsBy, k)
+			}
+			f.idx.versionsBy[versionKeyOf(r.RootID, r.Path, r.VersionNo)] = r
+			if err := appendRow(tFileVersions, *r); err != nil {
+				return total, err
+			}
+		}
+	}
+	for _, r := range f.idx.uploads {
+		if r.RootID != rootID {
+			continue
+		}
+		if rewrite(&r.Path) {
+			if err := appendRow(tUploadSessions, *r); err != nil {
+				return total, err
+			}
+		}
+	}
+	if total > 0 {
+		if err := f.syncNowLocked(); err != nil {
+			return total, err
+		}
+	}
+	return total, nil
 }
 
 // ---------- AI 描述 ----------
